@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # A newer push supersedes an in-flight run on the same ref, except on main
+  # where every commit's result is worth keeping.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  verify:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: eiaaw_pos
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/eiaaw_pos
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/eiaaw_pos_test
+      JWT_SECRET: ci-only-not-a-real-secret
+      WEB_ORIGIN: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # `npm ci` for a reproducible tree; postinstall generates the Prisma
+      # client, so nothing later has to remember to.
+      - name: Install
+        run: npm ci
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test:coverage
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
+
+      - name: Build
+        run: npm run build
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # --ignore-scripts: the audit does not need a generated Prisma client,
+      # and skipping lifecycle scripts keeps this job from running project code.
+      - run: npm ci --ignore-scripts
+
+      # Shipped code is held to a clean bill.
+      - name: Production dependencies (blocking)
+        run: npm audit --omit=dev --audit-level=high
+
+      # The dev toolchain is reported but does not block: ESLint's own
+      # minimatch/brace-expansion chain cannot be pinned without breaking
+      # ESLint, and a linter's glob parser is not part of the deployed attack
+      # surface. Visible so it is a decision, not a blind spot.
+      - name: Dev dependencies (advisory)
+        run: npm audit --audit-level=high || true
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history — a secret committed and later removed is still leaked
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    name: Container builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+
+      # All three build from the repository root; a Dockerfile that only builds
+      # on someone's laptop is found here rather than during a deploy.
+      - name: api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: false
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/worker/Dockerfile
+          push: false
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+      - name: web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          build-args: NEXT_PUBLIC_API_URL=http://localhost:3001
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web

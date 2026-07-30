@@ -1,0 +1,34 @@
+# Keep the build context small and the layers reproducible. Without this the
+# host's node_modules (hundreds of MB, with native binaries built for the host
+# platform) is uploaded to the daemon and can shadow the installed tree.
+node_modules
+**/node_modules
+
+# Build output — every stage rebuilds from source.
+dist
+**/dist
+.next
+**/.next
+out
+**/out
+
+# Never in an image.
+.env
+.env.*
+!.env.example
+
+# Not needed at build or runtime.
+.git
+.github
+coverage
+**/coverage
+test-results
+playwright-report
+*.md
+!README.md
+*.docx
+docker-compose*.yml
+.vscode
+.idea
+**/*.test.ts
+**/*.tsbuildinfo
