@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateOrderDto } from '@eiaaw/shared';
+import { CreateOrderDto, MONEY, TAX, businessDate } from '@eiaaw/shared';
 import { randomUUID } from 'crypto';
 
 const TENDER_ACCOUNT: Record<string, string> = {
@@ -16,6 +17,28 @@ const TENDER_ACCOUNT: Record<string, string> = {
   STORE_CREDIT: 'TENDER_STORE_CREDIT',
 };
 
+/**
+ * An order transaction takes a row lock on the outlet's sequence for its whole
+ * duration, so every concurrent sale at one outlet queues behind it. The
+ * default 5s ceiling is comfortable for a quiet shop and far too tight for a
+ * merchandise counter at an event, where the queue is the normal state.
+ */
+const ORDER_TX_OPTIONS = { maxWait: 15_000, timeout: 30_000 } as const;
+
+/** A line after the server has priced it. The request's own numbers are gone by here. */
+type PricedLine = {
+  variantId: string;
+  name: string;
+  sku: string;
+  qty: number;
+  unitPrice: number;
+  discount: number;
+  taxCode: string;
+  taxAmount: number;
+  total: number;
+  notes?: string;
+};
+
 @Injectable()
 export class OrdersService {
   constructor(private prisma: PrismaService) {}
@@ -24,6 +47,13 @@ export class OrdersService {
    * Create a completed order. Idempotent on dto.idempotencyKey — safe for
    * offline sync retries. Runs inventory decrement + double-entry ledger
    * posting in one transaction.
+   *
+   * The request is a statement of intent, not of price. Which items, how many,
+   * what was tendered — those come from the terminal. What they cost, what tax
+   * they carry and how the cash total rounds are all recomputed here from the
+   * catalog, because the terminal is hardware in a merchant's shop on a network
+   * anyone in the venue shares, and its request body is two keystrokes away in
+   * any browser's devtools.
    */
   async create(dto: CreateOrderDto) {
     const existing = await this.prisma.order.findUnique({
@@ -33,20 +63,48 @@ export class OrdersService {
 
     if (!dto.lines?.length) throw new BadRequestException('Order has no lines');
 
-    const subtotal = dto.lines.reduce((s, l) => s + l.unitPrice * l.qty, 0);
-    const lineDiscounts = dto.lines.reduce((s, l) => s + l.discount, 0);
-    const discountTotal = lineDiscounts + (dto.cartDiscount ?? 0);
-    const taxTotal = dto.lines.reduce((s, l) => s + l.taxAmount, 0);
-    const total = subtotal - discountTotal + (dto.roundingAdjustment ?? 0);
+    const outlet = await this.prisma.outlet.findUnique({ where: { id: dto.outletId } });
+    if (!outlet) throw new BadRequestException(`Unknown outlet ${dto.outletId}`);
 
-    const paid = (dto.payments ?? []).reduce((s, p) => s + p.amount, 0);
+    const payments = this.validatePayments(dto);
+    const { lines, subtotal, discountTotal, taxTotal } = await this.priceLines(dto);
+
+    const netTotal = subtotal - discountTotal;
+    // BNM 5-sen rounding is a property of settling in coins. An order paid by
+    // card or QR settles to the sen, so it does not round — and a rounding
+    // adjustment the terminal asked for is never taken on trust either way.
+    const cashOnly = payments.length > 0 && payments.every((p) => p.tender === 'CASH');
+    const roundingAdjustment = cashOnly ? MONEY.cashRounding(netTotal) : 0;
+    const total = netTotal + roundingAdjustment;
+
+    const paid = payments.reduce((s, p) => s + p.amount, 0);
     if (paid < total) {
       throw new BadRequestException(`Underpaid: total ${total} sen, tendered ${paid} sen`);
     }
+    // Change comes out of the drawer, so only cash may be over-tendered. An
+    // electronic tender that "overpays" is a way to walk out with the
+    // difference in notes.
+    const electronicPaid = payments.filter((p) => p.tender !== 'CASH').reduce((s, p) => s + p.amount, 0);
+    if (electronicPaid > total) {
+      throw new BadRequestException(
+        `Electronic tenders must settle the exact amount — overpaid by ${electronicPaid - total} sen`,
+      );
+    }
+    const change = paid - total;
 
-    const orderNo = await this.nextOrderNo(dto.outletId);
+    // The shift open on this register right now owns the cash. Null means the
+    // sale happened outside any shift, which is audited below: that cash can
+    // never be reconciled at cash-up.
+    const shift = dto.registerId
+      ? await this.prisma.shift.findUnique({ where: { activeRegisterId: dto.registerId } })
+      : null;
+
+    const claimedTotal = this.claimedTotal(dto);
+    const takesCash = payments.some((p) => p.tender === 'CASH');
 
     const order = await this.prisma.$transaction(async (tx) => {
+      const orderNo = await this.allocateOrderNo(tx, outlet.id, outlet.timezone);
+
       const created = await tx.order.create({
         data: {
           orderNo,
@@ -55,31 +113,19 @@ export class OrdersService {
           registerId: dto.registerId || null,
           staffId: dto.staffId || null,
           customerId: dto.customerId || null,
+          shiftId: shift?.id ?? null,
           eventId: dto.eventId || null,
           status: 'COMPLETED',
           subtotal,
           discountTotal,
           taxTotal,
-          roundingAdjustment: dto.roundingAdjustment ?? 0,
+          roundingAdjustment,
           total,
           offline: dto.offline ?? false,
           placedAt: dto.placedAt ? new Date(dto.placedAt) : new Date(),
-          lines: {
-            create: dto.lines.map((l) => ({
-              variantId: l.variantId,
-              name: l.name,
-              sku: l.sku,
-              qty: l.qty,
-              unitPrice: l.unitPrice,
-              discount: l.discount,
-              taxCode: l.taxCode,
-              taxAmount: l.taxAmount,
-              total: l.unitPrice * l.qty - l.discount,
-              notes: l.notes,
-            })),
-          },
+          lines: { create: lines },
           payments: {
-            create: (dto.payments ?? []).map((p) => ({
+            create: payments.map((p) => ({
               tender: p.tender,
               amount: p.amount,
               status: 'CAPTURED',
@@ -92,7 +138,7 @@ export class OrdersService {
       });
 
       // Inventory decrement + movement trail
-      for (const l of dto.lines) {
+      for (const l of lines) {
         const level = await tx.inventoryLevel.findUnique({
           where: { outletId_variantId: { outletId: dto.outletId, variantId: l.variantId } },
         });
@@ -113,20 +159,36 @@ export class OrdersService {
         });
       }
 
-      // Double-entry ledger: debit tender accounts, credit sales + tax payable
+      // Double-entry ledger: debit tender accounts, credit sales + tax payable.
+      // Every leg carries the shift, so cash-up can scope the drawer to the one
+      // till instead of guessing from timestamps.
       const txnId = randomUUID();
+      const where = {
+        shiftId: shift?.id ?? null,
+        outletId: dto.outletId,
+        registerId: dto.registerId || null,
+      };
       const netSales = total - taxTotal;
       const legs = [
-        ...(dto.payments ?? []).map((p) => ({
+        ...payments.map((p) => ({
           txnId,
           account: TENDER_ACCOUNT[p.tender] ?? 'TENDER_OTHER',
           debit: p.amount,
           credit: 0,
           refType: 'ORDER',
           refId: created.id,
+          ...where,
         })),
-        { txnId, account: 'SALES', debit: 0, credit: netSales, refType: 'ORDER', refId: created.id },
-        ...(taxTotal > 0
+        {
+          txnId,
+          account: 'SALES',
+          debit: 0,
+          credit: netSales,
+          refType: 'ORDER',
+          refId: created.id,
+          ...where,
+        },
+        ...(taxTotal !== 0
           ? [
               {
                 txnId,
@@ -135,20 +197,22 @@ export class OrdersService {
                 credit: taxTotal,
                 refType: 'ORDER',
                 refId: created.id,
+                ...where,
               },
             ]
           : []),
-        ...(paid > total
+        ...(change > 0
           ? [
               {
                 txnId,
                 account: 'TENDER_CASH',
                 debit: 0,
-                credit: paid - total,
+                credit: change,
                 refType: 'ORDER',
                 refId: created.id,
+                ...where,
               },
-            ] // change given
+            ]
           : []),
       ];
       await tx.ledgerEntry.createMany({ data: legs });
@@ -158,10 +222,45 @@ export class OrdersService {
         data: { orderId: created.id, type: 'CONSOLIDATED', status: 'QUEUED' },
       });
 
-      return created;
-    });
+      const trail: { action: string; detail: Prisma.InputJsonObject }[] = [];
+      if (discountTotal > 0) {
+        trail.push({
+          action: 'DISCOUNT',
+          detail: { discountTotal, cartDiscount: dto.cartDiscount ?? 0, subtotal, total },
+        });
+      }
+      if (claimedTotal !== null && claimedTotal !== total) {
+        // Not necessarily an attack: a terminal that sold from a cached catalog
+        // is stale, not dishonest. Either way the customer is holding a receipt
+        // with the other number printed on it, so the divergence has to be
+        // findable later.
+        trail.push({
+          action: 'PRICE_MISMATCH',
+          detail: { claimedTotal, chargedTotal: total, offline: dto.offline ?? false },
+        });
+      }
+      if (takesCash && !shift) {
+        trail.push({
+          action: 'CASH_OUTSIDE_SHIFT',
+          detail: { registerId: dto.registerId ?? null, amount: paid },
+        });
+      }
+      if (trail.length) {
+        await tx.auditLog.createMany({
+          data: trail.map((t) => ({
+            userId: dto.staffId || null,
+            action: t.action,
+            entity: 'Order',
+            entityId: created.id,
+            detail: t.detail,
+          })),
+        });
+      }
 
-    return { order, duplicate: false, change: paid - total };
+      return created;
+    }, ORDER_TX_OPTIONS);
+
+    return { order, duplicate: false, change };
   }
 
   list(outletId?: string, take = 50) {
@@ -205,6 +304,18 @@ export class OrdersService {
           },
         });
       }
+
+      // The refund leaves the drawer that is open *now*, not the one that took
+      // the sale — which may have cashed up hours ago.
+      const shift = order.registerId
+        ? await tx.shift.findUnique({ where: { activeRegisterId: order.registerId } })
+        : null;
+      const where = {
+        shiftId: shift?.id ?? null,
+        outletId: order.outletId,
+        registerId: order.registerId,
+      };
+
       const txnId = randomUUID();
       await tx.ledgerEntry.createMany({
         data: [
@@ -215,8 +326,9 @@ export class OrdersService {
             credit: 0,
             refType: 'REFUND',
             refId: id,
+            ...where,
           },
-          ...(order.taxTotal > 0
+          ...(order.taxTotal !== 0
             ? [
                 {
                   txnId,
@@ -225,16 +337,18 @@ export class OrdersService {
                   credit: 0,
                   refType: 'REFUND',
                   refId: id,
+                  ...where,
                 },
               ]
             : []),
-          ...order.payments.map((p) => ({
+          ...this.reversalTenderLegs(order).map((leg) => ({
             txnId,
-            account: TENDER_ACCOUNT[p.tender] ?? 'TENDER_OTHER',
+            account: leg.account,
             debit: 0,
-            credit: p.amount,
+            credit: leg.credit,
             refType: 'REFUND',
             refId: id,
+            ...where,
           })),
         ],
       });
@@ -245,14 +359,238 @@ export class OrdersService {
     });
   }
 
-  private async nextOrderNo(outletId: string): Promise<string> {
-    const today = new Date();
-    const prefix = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(
-      today.getDate(),
-    ).padStart(2, '0')}`;
-    const count = await this.prisma.order.count({
-      where: { outletId, createdAt: { gte: new Date(today.toDateString()) } },
+  // ── pricing ────────────────────────────────────────────────────────────────
+
+  /**
+   * Re-price every line from the catalog and apportion any cart-level discount
+   * across them, so that `sum(line.total)` always reconciles to
+   * `subtotal - discountTotal` and the tax on each line matches the money that
+   * line actually took.
+   */
+  private async priceLines(dto: CreateOrderDto) {
+    const ids = [...new Set(dto.lines.map((l) => l.variantId))];
+    const variants = await this.prisma.variant.findMany({
+      where: { id: { in: ids } },
+      include: { product: true },
     });
-    return `${prefix}-${String(count + 1).padStart(5, '0')}-${outletId.slice(-4)}`;
+    const byId = new Map(variants.map((v) => [v.id, v]));
+
+    // Pass 1: catalog price and line-level discount.
+    const priced = dto.lines.map((l) => {
+      const variant = byId.get(l.variantId);
+      if (!variant) throw new BadRequestException(`Unknown variant ${l.variantId}`);
+      if (!variant.active || !variant.product.active) {
+        throw new BadRequestException(`${variant.name} is inactive and cannot be sold`);
+      }
+
+      const qty = l.qty;
+      if (!Number.isInteger(qty) || qty <= 0) {
+        throw new BadRequestException(`Invalid quantity ${qty} for ${variant.name}`);
+      }
+
+      const lineDiscount = l.discount ?? 0;
+      const gross = variant.price * qty;
+      if (!Number.isInteger(lineDiscount) || lineDiscount < 0) {
+        throw new BadRequestException(`Invalid discount ${lineDiscount} on ${variant.name}`);
+      }
+      if (lineDiscount > gross) {
+        throw new BadRequestException(
+          `Discount ${lineDiscount} exceeds the ${gross} sen line for ${variant.name}`,
+        );
+      }
+
+      return { variant, qty, gross, lineDiscount, notes: l.notes, net: gross - lineDiscount };
+    });
+
+    const subtotal = priced.reduce((s, p) => s + p.gross, 0);
+    const lineDiscounts = priced.reduce((s, p) => s + p.lineDiscount, 0);
+    const netAfterLines = subtotal - lineDiscounts;
+
+    const cartDiscount = dto.cartDiscount ?? 0;
+    if (!Number.isInteger(cartDiscount) || cartDiscount < 0) {
+      throw new BadRequestException(`Invalid cart discount ${cartDiscount}`);
+    }
+    if (cartDiscount > netAfterLines) {
+      throw new BadRequestException(`Cart discount ${cartDiscount} exceeds the ${netAfterLines} sen cart`);
+    }
+
+    // Pass 2: spread the cart discount pro-rata, and give the rounding residue
+    // to the largest line so the parts sum exactly back to the whole.
+    const shares = this.apportion(
+      cartDiscount,
+      priced.map((p) => p.net),
+    );
+
+    const lines: PricedLine[] = priced.map((p, i) => {
+      const discount = p.lineDiscount + shares[i];
+      const total = p.gross - discount;
+      const taxCode = p.variant.product.taxCode;
+      return {
+        variantId: p.variant.id,
+        name: p.variant.name,
+        sku: p.variant.sku,
+        qty: p.qty,
+        unitPrice: p.variant.price,
+        discount,
+        taxCode,
+        taxAmount: this.taxOn(total, taxCode, p.variant.name),
+        total,
+        notes: p.notes,
+      };
+    });
+
+    return {
+      lines,
+      subtotal,
+      discountTotal: lineDiscounts + cartDiscount,
+      taxTotal: lines.reduce((s, l) => s + l.taxAmount, 0),
+    };
+  }
+
+  /**
+   * Tax on an amount, refusing a code the catalog should never have carried.
+   * The quiet alternative — treating the unknown as zero-rated — under-declares
+   * SST on every sale of that item and leaves nothing behind to find it by.
+   */
+  private taxOn(amount: number, taxCode: string, itemName: string): number {
+    try {
+      return TAX.inclusiveComponent(amount, taxCode);
+    } catch {
+      throw new BadRequestException(
+        `${itemName} carries an unrecognised tax code "${taxCode}" — fix it in the back office before selling it`,
+      );
+    }
+  }
+
+  /**
+   * Split `amount` across `weights` so the parts are proportional and sum
+   * exactly to the whole. Largest-remainder: floor every share, then hand the
+   * leftover sen out to the lines that lost the most in the flooring.
+   */
+  private apportion(amount: number, weights: number[]): number[] {
+    if (amount === 0) return weights.map(() => 0);
+    const totalWeight = weights.reduce((s, w) => s + w, 0);
+    if (totalWeight === 0) return weights.map(() => 0);
+
+    const exact = weights.map((w) => (amount * w) / totalWeight);
+    const shares = exact.map(Math.floor);
+    let residue = amount - shares.reduce((s, v) => s + v, 0);
+
+    const byRemainder = exact
+      .map((value, index) => ({ index, remainder: value - Math.floor(value) }))
+      .sort((a, b) => b.remainder - a.remainder);
+    for (let i = 0; residue > 0; i = (i + 1) % byRemainder.length) {
+      shares[byRemainder[i].index] += 1;
+      residue -= 1;
+    }
+    return shares;
+  }
+
+  private validatePayments(dto: CreateOrderDto) {
+    const payments = dto.payments ?? [];
+    for (const p of payments) {
+      if (!Number.isInteger(p.amount) || p.amount < 0) {
+        throw new BadRequestException(`Invalid payment amount ${p.amount} for ${p.tender}`);
+      }
+    }
+    return payments;
+  }
+
+  /**
+   * The total the terminal believed it was charging, reconstructed from the
+   * request. Null when the request's own numbers are not arithmetic — there is
+   * then nothing meaningful to compare against.
+   */
+  private claimedTotal(dto: CreateOrderDto): number | null {
+    const lines = dto.lines.reduce((s, l) => s + l.unitPrice * l.qty - (l.discount ?? 0), 0);
+    const claimed = lines - (dto.cartDiscount ?? 0) + (dto.roundingAdjustment ?? 0);
+    return Number.isFinite(claimed) ? claimed : null;
+  }
+
+  // ── numbering ──────────────────────────────────────────────────────────────
+
+  /**
+   * Reserve the next receipt number for the outlet's trading day.
+   *
+   * One statement, so concurrent sales serialise on the sequence row instead of
+   * racing: `INSERT … ON CONFLICT DO UPDATE` takes the row lock, increments, and
+   * returns the value it wrote. The predecessor read `COUNT(*) + 1` outside the
+   * transaction, which hands the same number to every terminal that reads it in
+   * the same moment — all but one of them then losing to the unique index, as a
+   * failed sale, at the counter, during the busiest minute of the day.
+   *
+   * Called inside the order transaction so a rolled-back order gives its number
+   * back rather than leaving a gap in the receipt run.
+   *
+   * The first allocation of an outlet's day seeds itself from the receipt
+   * numbers already issued that day rather than starting at 1. Any deployment
+   * that has traded before this code shipped has orders numbered by the old
+   * count-based scheme and nothing wrote them into the sequence — so starting
+   * at 1 collides with a number already printed on a customer's receipt, and
+   * the first sale after the upgrade fails at the counter. The scan runs once
+   * per outlet per day; every subsequent sale takes the ON CONFLICT path.
+   */
+  private async allocateOrderNo(
+    tx: {
+      $queryRaw: <T>(query: TemplateStringsArray, ...values: unknown[]) => Promise<T>;
+    },
+    outletId: string,
+    timezone: string,
+  ): Promise<string> {
+    const date = businessDate(new Date(), timezone);
+    const prefix = date.replace(/-/g, '');
+    const rows = await tx.$queryRaw<{ lastValue: number }[]>`
+      INSERT INTO "OrderSequence" ("id", "outletId", "businessDate", "lastValue")
+      VALUES (
+        ${randomUUID()},
+        ${outletId},
+        ${date},
+        COALESCE(
+          (
+            SELECT MAX(split_part("orderNo", '-', 2)::int)
+            FROM "Order"
+            WHERE "outletId" = ${outletId}
+              -- Anchored to this outlet's day, and to the shape we can parse:
+              -- an offline terminal prints LOCAL-xxxxxxxx, which has no
+              -- sequence in it and would fail the cast.
+              AND "orderNo" ~ ${`^${prefix}-[0-9]{5}-`}
+          ),
+          0
+        ) + 1
+      )
+      ON CONFLICT ("outletId", "businessDate")
+      DO UPDATE SET "lastValue" = "OrderSequence"."lastValue" + 1
+      RETURNING "lastValue"`;
+
+    const sequence = rows[0].lastValue;
+    return `${prefix}-${String(sequence).padStart(5, '0')}-${outletId.slice(-4)}`;
+  }
+
+  /**
+   * Tender legs for a reversal, crediting back what the till actually kept.
+   *
+   * Change handed over the counter was never the merchant's, so reversing the
+   * full amount tendered credits money that already walked out of the door —
+   * and leaves the transaction's credits exceeding its debits, which is a
+   * ledger that no longer balances.
+   */
+  private reversalTenderLegs(order: {
+    total: number;
+    payments: { tender: string; amount: number }[];
+  }): { account: string; credit: number }[] {
+    let change = order.payments.reduce((s, p) => s + p.amount, 0) - order.total;
+    const legs: { account: string; credit: number }[] = [];
+    for (const p of order.payments) {
+      let credit = p.amount;
+      if (change > 0 && p.tender === 'CASH') {
+        const taken = Math.min(credit, change);
+        credit -= taken;
+        change -= taken;
+      }
+      if (credit > 0) {
+        legs.push({ account: TENDER_ACCOUNT[p.tender] ?? 'TENDER_OTHER', credit });
+      }
+    }
+    return legs;
   }
 }

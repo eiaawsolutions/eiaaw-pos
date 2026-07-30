@@ -1,14 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '@/lib/api';
-import { enqueue, pendingCount, startAutoDrain } from '@/lib/outbox';
+import { ApiError, api } from '@/lib/api';
+import { enqueue, pendingCount, rejectedCount, startAutoDrain } from '@/lib/outbox';
 import { browserPrint } from '@/lib/print';
-import { MONEY, type CartLineDto, type CreateOrderDto, type TenderType } from '@eiaaw/shared';
+import { MONEY, TAX, type CartLineDto, type CreateOrderDto, type TenderType } from '@eiaaw/shared';
 
 const OUTLET_ID = 'outlet-hq';
 const REGISTER_ID = 'reg-1';
-const SST_RATE = 0.08; // item-level tax codes drive this in back-office; scaffold uses SST8
 
 type Product = {
   id: string;
@@ -18,12 +17,24 @@ type Product = {
   variants: { id: string; sku: string; name: string; price: number; barcodes: { code: string }[] }[];
 };
 
+/** The order as the server priced it — the figures the receipt is printed from. */
+type PricedOrder = {
+  orderNo: string;
+  subtotal: number;
+  taxTotal: number;
+  roundingAdjustment: number;
+  total: number;
+  lines: { name: string; qty: number; total: number }[];
+  payments: { tender: string; amount: number }[];
+};
+
 export default function PosPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartLineDto[]>([]);
   const [search, setSearch] = useState('');
   const [online, setOnline] = useState(true);
   const [pending, setPending] = useState(0);
+  const [parked, setParked] = useState(0);
   const [payOpen, setPayOpen] = useState(false);
   const [toast, setToast] = useState('');
   const scanBuffer = useRef('');
@@ -38,8 +49,12 @@ export default function PosPage() {
     const off = () => setOnline(false);
     window.addEventListener('online', on);
     window.addEventListener('offline', off);
-    const stop = startAutoDrain(REGISTER_ID, setPending);
-    setPending(pendingCount());
+    const syncCounts = (queued: number) => {
+      setPending(queued);
+      setParked(rejectedCount());
+    };
+    const stop = startAutoDrain(REGISTER_ID, syncCounts);
+    syncCounts(pendingCount());
     return () => {
       window.removeEventListener('online', on);
       window.removeEventListener('offline', off);
@@ -55,7 +70,7 @@ export default function PosPage() {
         next[idx] = {
           ...next[idx],
           qty: next[idx].qty + 1,
-          taxAmount: taxFor(next[idx].unitPrice, next[idx].qty + 1),
+          taxAmount: taxFor(next[idx].unitPrice, next[idx].qty + 1, next[idx].taxCode),
         };
         return next;
       }
@@ -69,7 +84,7 @@ export default function PosPage() {
           unitPrice: v.price,
           discount: 0,
           taxCode: p.taxCode,
-          taxAmount: taxFor(v.price, 1),
+          taxAmount: taxFor(v.price, 1, p.taxCode),
         },
       ];
     });
@@ -135,28 +150,62 @@ export default function PosPage() {
       payments: [{ tender, amount: tender === 'CASH' ? tendered : total, reference }],
       placedAt: new Date().toISOString(),
     };
-    let orderNo = `LOCAL-${order.idempotencyKey.slice(0, 8)}`;
-    try {
-      const res = await api<{ order: { orderNo: string } }>('/orders', {
-        method: 'POST',
-        body: JSON.stringify(order),
-      });
-      orderNo = res.order.orderNo;
-    } catch {
-      enqueue({ ...order, offline: true });
-      setPending(pendingCount());
-      setToast('Offline — order queued, will sync automatically');
-    }
-    browserPrint({
-      outletName: 'EIAAW Demo Outlet',
-      orderNo,
+    // What the cart believed, used only until the server answers. The server
+    // re-prices from the catalog, so its figures are the sale — and the receipt
+    // in the customer's hand should be the one that matches the books.
+    let receipt = {
+      orderNo: `LOCAL-${order.idempotencyKey.slice(0, 8)}`,
       lines: cart.map((l) => ({ name: l.name, qty: l.qty, total: l.unitPrice * l.qty - l.discount })),
       subtotal: totals.subtotal,
       tax: totals.tax,
       rounding,
       total,
-      payments: [{ tender, amount: tender === 'CASH' ? tendered : total }],
+      paid: tender === 'CASH' ? tendered : total,
       change: tender === 'CASH' ? tendered - total : 0,
+    };
+
+    try {
+      const res = await api<{ order: PricedOrder; change: number }>('/orders', {
+        method: 'POST',
+        body: JSON.stringify(order),
+      });
+      receipt = {
+        orderNo: res.order.orderNo,
+        lines: res.order.lines.map((l) => ({ name: l.name, qty: l.qty, total: l.total })),
+        subtotal: res.order.subtotal,
+        tax: res.order.taxTotal,
+        rounding: res.order.roundingAdjustment,
+        total: res.order.total,
+        paid: res.order.payments.reduce((s, p) => s + p.amount, 0),
+        change: res.change ?? 0,
+      };
+      if (receipt.total !== total) {
+        setToast(`Priced at ${MONEY.fmt(receipt.total)} from the catalog — check the receipt`);
+      }
+    } catch (e) {
+      // A refusal is not an outage. Queueing one retries it every ten seconds
+      // forever, and printing a receipt for it hands the customer proof of a
+      // sale the books will never contain. Keep the cart, tell the cashier.
+      if (e instanceof ApiError && e.isRefusal) {
+        setToast(`Sale refused — ${e.message}`);
+        setPayOpen(false);
+        return;
+      }
+      enqueue({ ...order, offline: true });
+      setPending(pendingCount());
+      setToast('Offline — order queued, will sync automatically');
+    }
+
+    browserPrint({
+      outletName: 'EIAAW Demo Outlet',
+      orderNo: receipt.orderNo,
+      lines: receipt.lines,
+      subtotal: receipt.subtotal,
+      tax: receipt.tax,
+      rounding: receipt.rounding,
+      total: receipt.total,
+      payments: [{ tender, amount: receipt.paid }],
+      change: receipt.change,
     });
     setCart([]);
     setPayOpen(false);
@@ -169,6 +218,7 @@ export default function PosPage() {
           <strong>EIAAW POS · Counter 1</strong>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             {pending > 0 && <span className="badge badge-off">{pending} queued</span>}
+            {parked > 0 && <span className="badge badge-off">{parked} need attention</span>}
             <span className={`badge ${online ? 'badge-on' : 'badge-off'}`}>
               {online ? 'ONLINE' : 'OFFLINE — still selling'}
             </span>
@@ -225,7 +275,7 @@ export default function PosPage() {
                             ? {
                                 ...x,
                                 qty: Math.max(1, x.qty - 1),
-                                taxAmount: taxFor(x.unitPrice, Math.max(1, x.qty - 1)),
+                                taxAmount: taxFor(x.unitPrice, Math.max(1, x.qty - 1), x.taxCode),
                               }
                             : x,
                         ),
@@ -241,7 +291,9 @@ export default function PosPage() {
                     onClick={() =>
                       setCart((c) =>
                         c.map((x, j) =>
-                          j === i ? { ...x, qty: x.qty + 1, taxAmount: taxFor(x.unitPrice, x.qty + 1) } : x,
+                          j === i
+                            ? { ...x, qty: x.qty + 1, taxAmount: taxFor(x.unitPrice, x.qty + 1, x.taxCode) }
+                            : x,
                         ),
                       )
                     }
@@ -284,9 +336,23 @@ export default function PosPage() {
   );
 }
 
-function taxFor(unitPrice: number, qty: number) {
-  // tax-inclusive SST portion: price * rate / (1 + rate)
-  return Math.round((unitPrice * qty * SST_RATE) / (1 + SST_RATE));
+/**
+ * Cart-side preview of the SST inside a line, using the item's own tax code
+ * rather than one flat rate — a zero-rated item priced as if it were SST8 shows
+ * the customer tax it is not being charged, and disagrees with the server's
+ * figure on every sale.
+ *
+ * Only ever a preview: the server re-prices from the catalog and its number is
+ * the one recorded. So an unrecognised code shows nothing here rather than
+ * taking the terminal down — the sale is refused server-side, with a message
+ * naming the item to fix.
+ */
+function taxFor(unitPrice: number, qty: number, taxCode: string) {
+  try {
+    return TAX.inclusiveComponent(unitPrice * qty, taxCode);
+  } catch {
+    return 0;
+  }
 }
 
 function Row({ label, value, big, muted }: { label: string; value: string; big?: boolean; muted?: boolean }) {
