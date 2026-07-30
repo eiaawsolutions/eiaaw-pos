@@ -1,0 +1,334 @@
+// EIAAW POS — core data model (PostgreSQL)
+// Money is stored as integer sen. No PAN is ever stored (PCI SAQ-A posture).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["queryCompiler", "driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Org & access ──────────────────────────────────────────────────────────────
+
+model Outlet {
+  id        String   @id @default(cuid())
+  name      String
+  profile   String   @default("RETAIL") // RETAIL | FNB | EVENTS | SERVICES
+  address   String?
+  sstNo     String?
+  tin       String? // LHDN taxpayer identification (MyInvois)
+  createdAt DateTime @default(now())
+
+  registers Register[]
+  inventory InventoryLevel[]
+  orders    Order[]
+  shifts    Shift[]
+}
+
+model Register {
+  id        String   @id @default(cuid())
+  name      String
+  outletId  String
+  outlet    Outlet   @relation(fields: [outletId], references: [id])
+  deviceKey String   @unique @default(cuid()) // device registration token
+  lastSeen  DateTime?
+  eventMode Boolean  @default(false)
+
+  orders Order[]
+  shifts Shift[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  pin          String? // hashed 6-digit PIN for terminal switch-user
+  passwordHash String
+  role         String   @default("CASHIER") // OWNER | MANAGER | CASHIER | KITCHEN
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  orders        Order[]
+  shifts        Shift[]
+  auditLogs     AuditLog[]
+  cashMovements CashMovement[]
+}
+
+// ── Catalog ───────────────────────────────────────────────────────────────────
+
+model Category {
+  id       String    @id @default(cuid())
+  name     String
+  sort     Int       @default(0)
+  color    String? // POS grid tile color
+  products Product[]
+}
+
+model Product {
+  id          String    @id @default(cuid())
+  name        String
+  categoryId  String?
+  category    Category? @relation(fields: [categoryId], references: [id])
+  description String?
+  imageUrl    String?
+  taxCode     String    @default("SST8") // SST8 | SST6 | ZRL | EXEMPT
+  isComposite Boolean   @default(false)
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  variants Variant[]
+}
+
+model Variant {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  sku       String   @unique
+  name      String // e.g. "Red / L" or same as product for single-variant
+  price     Int // sen
+  cost      Int      @default(0) // sen, moving average
+  trackStock Boolean @default(true)
+  active    Boolean  @default(true)
+
+  barcodes   Barcode[]
+  inventory  InventoryLevel[]
+  orderLines OrderLine[]
+  movements  StockMovement[]
+}
+
+model Barcode {
+  id        String  @id @default(cuid())
+  code      String  @unique // GTIN/EAN/UPC or internal
+  variantId String
+  variant   Variant @relation(fields: [variantId], references: [id])
+}
+
+// ── Inventory ────────────────────────────────────────────────────────────────
+
+model InventoryLevel {
+  id        String  @id @default(cuid())
+  outletId  String
+  outlet    Outlet  @relation(fields: [outletId], references: [id])
+  variantId String
+  variant   Variant @relation(fields: [variantId], references: [id])
+  onHand    Int     @default(0)
+  reorderAt Int     @default(0)
+
+  @@unique([outletId, variantId])
+}
+
+model StockMovement {
+  id        String   @id @default(cuid())
+  outletId  String
+  variantId String
+  variant   Variant  @relation(fields: [variantId], references: [id])
+  qty       Int // +receive, -sale, +/- adjust
+  type      String // SALE | REFUND | RECEIVE | ADJUST | TRANSFER_IN | TRANSFER_OUT | STOCKTAKE
+  reason    String?
+  refId     String? // orderId / poId
+  createdAt DateTime @default(now())
+
+  @@index([outletId, variantId, createdAt])
+}
+
+// ── Customers & loyalty ───────────────────────────────────────────────────────
+
+model Customer {
+  id          String   @id @default(cuid())
+  name        String
+  phone       String?  @unique
+  email       String?
+  tin         String? // for MyInvois full e-invoice requests
+  pdpaConsent Boolean  @default(false)
+  points      Int      @default(0)
+  storeCredit Int      @default(0) // sen
+  createdAt   DateTime @default(now())
+
+  orders Order[]
+}
+
+// ── Orders & payments ─────────────────────────────────────────────────────────
+
+model Order {
+  id                 String   @id @default(cuid())
+  orderNo            String   @unique
+  idempotencyKey     String   @unique
+  outletId           String
+  outlet             Outlet   @relation(fields: [outletId], references: [id])
+  registerId         String?
+  register           Register? @relation(fields: [registerId], references: [id])
+  staffId            String?
+  staff              User?    @relation(fields: [staffId], references: [id])
+  customerId         String?
+  customer           Customer? @relation(fields: [customerId], references: [id])
+  eventId            String?
+  status             String   @default("COMPLETED") // OPEN|HELD|COMPLETED|VOIDED|REFUNDED|PARTIAL_REFUND
+  subtotal           Int
+  discountTotal      Int      @default(0)
+  taxTotal           Int      @default(0)
+  roundingAdjustment Int      @default(0)
+  total              Int
+  offline            Boolean  @default(false)
+  placedAt           DateTime @default(now()) // device time
+  createdAt          DateTime @default(now()) // server time
+
+  lines    OrderLine[]
+  payments Payment[]
+  einvoice EInvoice?
+
+  @@index([outletId, createdAt])
+  @@index([createdAt])
+}
+
+model OrderLine {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id])
+  variantId String
+  variant   Variant @relation(fields: [variantId], references: [id])
+  name      String // snapshot at sale time
+  sku       String
+  qty       Int
+  unitPrice Int
+  discount  Int     @default(0)
+  taxCode   String  @default("SST8")
+  taxAmount Int     @default(0)
+  total     Int
+  notes     String?
+}
+
+model Payment {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id])
+  tender      String // TenderType
+  amount      Int
+  status      String   @default("CAPTURED") // PENDING|AUTHORIZED|CAPTURED|FAILED|REFUNDED|CANCELLED
+  provider    String? // CASH | MOCK | FIUU | STRIPE | ADYEN ...
+  providerRef String? // PSP transaction id / approval code / last4 — never PAN
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// Append-only double-entry ledger
+model LedgerEntry {
+  id        String   @id @default(cuid())
+  txnId     String // groups the two legs
+  account   String // SALES | TENDER_CASH | TENDER_DUITNOW | PSP_FEES | REFUNDS | TAX_PAYABLE ...
+  debit     Int      @default(0)
+  credit    Int      @default(0)
+  refType   String? // ORDER | PAYMENT | REFUND | SETTLEMENT
+  refId     String?
+  createdAt DateTime @default(now())
+
+  @@index([account, createdAt])
+}
+
+// ── Shifts & cash ─────────────────────────────────────────────────────────────
+
+model Shift {
+  id           String    @id @default(cuid())
+  outletId     String
+  outlet       Outlet    @relation(fields: [outletId], references: [id])
+  registerId   String
+  register     Register  @relation(fields: [registerId], references: [id])
+  openedById   String
+  openedBy     User      @relation(fields: [openedById], references: [id])
+  openingFloat Int       @default(0)
+  closingCount Int?
+  expectedCash Int?
+  overShort    Int?
+  openedAt     DateTime  @default(now())
+  closedAt     DateTime?
+
+  cashMovements CashMovement[]
+}
+
+model CashMovement {
+  id        String   @id @default(cuid())
+  shiftId   String
+  shift     Shift    @relation(fields: [shiftId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String // CASH_IN | CASH_OUT | FLOAT | DROP
+  amount    Int
+  reason    String?
+  createdAt DateTime @default(now())
+}
+
+// ── Compliance & ops ──────────────────────────────────────────────────────────
+
+model EInvoice {
+  id          String   @id @default(cuid())
+  orderId     String   @unique
+  order       Order    @relation(fields: [orderId], references: [id])
+  type        String   @default("CONSOLIDATED") // CONSOLIDATED | FULL
+  status      String   @default("QUEUED") // QUEUED | SUBMITTED | VALIDATED | REJECTED
+  uuid        String? // MyInvois document UUID
+  longId      String?
+  submittedAt DateTime?
+  payload     Json?
+}
+
+// ── AI auto-onboarding (zero-hallucination ingest) ────────────────────────────
+// User drops in an event script + item documents (barcodes/QR + pricing).
+// The extractor NEVER guesses: every missing/ambiguous field becomes a
+// clarification question. Catalog is only committed when zero questions remain.
+
+model ImportSession {
+  id         String   @id @default(cuid())
+  name       String
+  status     String   @default("EXTRACTING") // EXTRACTING | AWAITING_ANSWERS | READY | COMMITTED | FAILED
+  sourceText String // raw pasted/uploaded content (event script, price list, CSV)
+  eventNotes String? // extracted event context (dates, booths, expected volume)
+  questions  Json? // open clarification questions [{id, itemRef, field, question}]
+  answers    Json? // accumulated user answers
+  createdAt  DateTime @default(now())
+
+  items ImportItem[]
+}
+
+model ImportItem {
+  id        String        @id @default(cuid())
+  sessionId String
+  session   ImportSession @relation(fields: [sessionId], references: [id])
+  ref       String // stable reference used in questions (e.g. "item-3")
+  name      String?
+  sku       String?
+  barcode   String?
+  price     Int? // sen — null until explicitly known
+  category  String?
+  taxCode   String?
+  qtyOnHand Int?
+  evidence  String? // source-text fragment the extraction came from (auditability)
+  missing   String[] // fields still unresolved — must be empty before commit
+  status    String        @default("DRAFT") // DRAFT | RESOLVED | COMMITTED
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String // VOID | REFUND | PRICE_OVERRIDE | DISCOUNT | LOGIN | SHIFT_CLOSE ...
+  entity    String?
+  entityId  String?
+  detail    Json?
+  createdAt DateTime @default(now())
+
+  @@index([action, createdAt])
+}
+
+// Hourly pre-aggregated rollups keep dashboards fast at event volume
+model SalesRollupHourly {
+  id       String   @id @default(cuid())
+  outletId String
+  bucket   DateTime // truncated to hour
+  orders   Int      @default(0)
+  sales    Int      @default(0)
+
+  @@unique([outletId, bucket])
+}

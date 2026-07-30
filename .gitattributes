@@ -1,0 +1,25 @@
+# Normalise all text to LF in the repository. Developers on Windows still get
+# CRLF in their working copy where the platform expects it, but anything that
+# runs inside a Linux container must be LF or the shebang/CMD breaks.
+* text=auto eol=lf
+
+# Files that are executed on Linux — never CRLF, even on a Windows checkout.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+.env.example    text eol=lf
+
+# Binary — never touch.
+*.docx          binary
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.webp          binary
+*.ico           binary
+*.pdf           binary
+*.woff          binary
+*.woff2         binary
+
+# Generated — collapse in diffs and exclude from language stats.
+package-lock.json  linguist-generated=true -diff
