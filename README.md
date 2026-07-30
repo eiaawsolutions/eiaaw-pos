@@ -16,16 +16,22 @@ Full blueprint: see `PRD-EIAAW-POS.md`.
 
 ```bash
 npm install
-cp .env.example .env            # set DATABASE_URL to a local Postgres
+cp .env.example .env                      # then fill in the values below
+docker compose -f docker-compose.dev.yml up -d   # postgres + redis
 npm run build -w packages/shared
-npx -w apps/api prisma db push  # create schema
-npm run db:seed                 # demo outlet, users, products
-npm run dev:api                 # :3001
-npm run dev:web                 # :3000  (new terminal)
-npm run dev:worker              # optional
+npx -w apps/api prisma db push            # create schema
+npm run db:seed                           # demo outlet, users, products
+npm run dev:api                           # :3001
+npm run dev:web                           # :3000  (new terminal)
+npm run dev:worker                        # optional
 ```
 
 Login: `admin@eiaawsolutions.com` / `ChangeMe123!` (terminal PIN `123456`).
+
+**Port conflicts.** Postgres and Redis default to 5432/6379. If another project
+on your machine already holds those, set `POSTGRES_PORT` / `REDIS_PORT` in `.env`
+before `docker compose up`, and make `DATABASE_URL` and `REDIS_URL` agree — the
+compose file reads them.
 
 ## Deploy to Railway (per client)
 

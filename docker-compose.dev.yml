@@ -1,0 +1,50 @@
+# Local development dependencies for EIAAW POS.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# Ports are overridable because a developer machine often already has a
+# Postgres on 5432 from another project. Set POSTGRES_PORT / REDIS_PORT in a
+# local .env (gitignored) to move them; DATABASE_URL must agree.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eiaaw-pos-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: eiaaw_pos
+      # Deterministic collation so ORDER BY on product names matches
+      # production regardless of the developer's host locale.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - eiaaw-pos-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d eiaaw_pos"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Queues, cache, and the pub/sub channel behind the live dashboards.
+  # Not required for the current scaffold, which polls the database, but the
+  # PRD's event-scale path (BullMQ) needs it and the deps are already present.
+  redis:
+    image: redis:7-alpine
+    container_name: eiaaw-pos-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - eiaaw-pos-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  eiaaw-pos-pgdata:
+  eiaaw-pos-redisdata:

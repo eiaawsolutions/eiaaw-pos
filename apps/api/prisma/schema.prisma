@@ -1,9 +1,15 @@
 // EIAAW POS — core data model (PostgreSQL)
 // Money is stored as integer sen. No PAN is ever stored (PCI SAQ-A posture).
 
+// `queryCompiler` was in previewFeatures and made every query throw on Node 24:
+// the WASM compiler's panic registry is never initialised, so it dies in its own
+// error handler ("Cannot read properties of undefined (reading 'set_message')")
+// and masks the real error underneath. `driverAdapters` alone keeps the PrismaPg
+// adapter the services already use. Revisit when moving to Prisma 7, where the
+// query compiler is no longer a preview flag.
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["queryCompiler", "driverAdapters"]
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
