@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
+import { LoggerModule } from 'nestjs-pino';
+import { TerminusModule } from '@nestjs/terminus';
+import { loggerConfig } from './common/logging';
 import { PrismaService } from './prisma/prisma.service';
 import { AuthController } from './auth/auth.controller';
 import { AuthService } from './auth/auth.service';
@@ -24,6 +27,8 @@ import { OnboardingService } from './ai/onboarding.service';
 
 @Module({
   imports: [
+    LoggerModule.forRoot(loggerConfig()),
+    TerminusModule,
     JwtModule.register({
       global: true,
       secret: process.env.JWT_SECRET ?? 'dev-secret-change-me',

@@ -63,8 +63,13 @@ USER node
 
 EXPOSE 3001
 
+# Liveness, not readiness. A failing container healthcheck gets the container
+# restarted, and restarting every replica because the database blipped turns a
+# recoverable dependency outage into a full one. The load balancer polls
+# /api/health (readiness) to decide what receives traffic; this decides only
+# whether the process itself is wedged.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:3001/api/health || exit 1
+  CMD wget -qO- http://127.0.0.1:3001/api/health/live || exit 1
 
 # TODO(schema): `db push` on boot races when the service runs more than one
 # replica — which the event-scale path requires — and is destructive against a

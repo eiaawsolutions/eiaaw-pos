@@ -57,7 +57,10 @@ const ALLOW = [
   /\bdev-only\b/i,
   /\byour[-_][a-z]/i, // your-api-key, your_token
   /(?:^|[^A-Za-z0-9])x{6,}(?:[^A-Za-z0-9]|$)/i, // xxxxxx redaction
-  /postgres:postgres@localhost/, // the documented local development database
+  // postgres:postgres on a loopback address is the documented development and
+  // test credential pair, not a secret. Loopback only — the same user:password
+  // against a real host is exactly what this rule should still catch.
+  /postgres:postgres@(?:localhost|127\.0\.0\.1|\[::1\]|host\.docker\.internal)\b/,
   /secret:\/\//, // an Infisical handle is a reference, not a value
 ];
 
