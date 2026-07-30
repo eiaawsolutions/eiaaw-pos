@@ -144,7 +144,10 @@ export class OnboardingService {
 
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private async extract(sourceText: string, answers: Record<string, string> | null): Promise<ExtractionResult> {
+  private async extract(
+    sourceText: string,
+    answers: Record<string, string> | null,
+  ): Promise<ExtractionResult> {
     const client = this.anthropic();
     if (client) {
       const userContent = answers
@@ -187,7 +190,16 @@ export class OnboardingService {
       const barcode = parts.find((p) => /^\d{8,14}$/.test(p)) ?? null;
       const priceStr = parts.find((p) => /^(RM\s*)?\d+(\.\d{1,2})?$/i.test(p) && p !== barcode);
       const price = priceStr ? Math.round(parseFloat(priceStr.replace(/RM\s*/i, '')) * 100) : null;
-      const item: ExtractedItem = { ref, name, sku: null, barcode, price, category: null, qtyOnHand: null, evidence: line };
+      const item: ExtractedItem = {
+        ref,
+        name,
+        sku: null,
+        barcode,
+        price,
+        category: null,
+        qtyOnHand: null,
+        evidence: line,
+      };
       for (const field of REQUIRED_FIELDS) {
         const qid = `q-${ref}-${field}`;
         if (item[field] == null) {
@@ -212,7 +224,8 @@ export class OnboardingService {
         id: 'q-doc-format',
         itemRef: null,
         field: 'document',
-        question: 'No items could be read from the document. Please provide lines as: name, barcode, price (e.g. "Teh Tarik, 9551000000017, RM4.50").',
+        question:
+          'No items could be read from the document. Please provide lines as: name, barcode, price (e.g. "Teh Tarik, 9551000000017, RM4.50").',
       });
     }
     return { eventNotes: null, items, questions };

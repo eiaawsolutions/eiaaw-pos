@@ -9,10 +9,7 @@ export class CustomersService {
     return this.prisma.customer.findMany({
       where: search
         ? {
-            OR: [
-              { name: { contains: search, mode: 'insensitive' } },
-              { phone: { contains: search } },
-            ],
+            OR: [{ name: { contains: search, mode: 'insensitive' } }, { phone: { contains: search } }],
           }
         : undefined,
       orderBy: { createdAt: 'desc' },

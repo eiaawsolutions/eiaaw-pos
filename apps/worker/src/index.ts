@@ -48,7 +48,10 @@ async function rollupHourly() {
 
 async function main() {
   console.log('EIAAW POS worker started');
-  setInterval(() => submitQueuedEInvoices().catch((e) => console.error('[einvoice]', e)), EINVOICE_INTERVAL_MS);
+  setInterval(
+    () => submitQueuedEInvoices().catch((e) => console.error('[einvoice]', e)),
+    EINVOICE_INTERVAL_MS,
+  );
   setInterval(() => rollupHourly().catch((e) => console.error('[rollup]', e)), ROLLUP_INTERVAL_MS);
 }
 

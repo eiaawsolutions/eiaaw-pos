@@ -17,18 +17,26 @@ export const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: url }),
 });
 
-/** Every table Prisma manages, discovered once so new models are covered automatically. */
-let tables: string[] | null = null;
+/**
+ * Every table Prisma manages, discovered once so new models are covered
+ * automatically as the schema grows.
+ *
+ * Memoised on the *promise* rather than the resolved value: awaiting first and
+ * assigning after leaves a window where two concurrent callers both miss the
+ * cache and both query. Caching the promise makes the query happen once.
+ */
+let tablesPromise: Promise<string[]> | null = null;
 
-async function tableNames(): Promise<string[]> {
-  if (tables) return tables;
-  // ::text is required — pg_tables.tablename is the Postgres `name` type,
-  // which the Prisma client cannot deserialize.
-  const rows = await prisma.$queryRaw<{ tablename: string }[]>`
-    SELECT tablename::text FROM pg_tables
-    WHERE schemaname = 'public' AND tablename NOT LIKE '\\_prisma\\_%'`;
-  tables = rows.map((r) => `"public"."${r.tablename}"`);
-  return tables;
+function tableNames(): Promise<string[]> {
+  tablesPromise ??= (async () => {
+    // ::text is required — pg_tables.tablename is the Postgres `name` type,
+    // which the Prisma client cannot deserialize.
+    const rows = await prisma.$queryRaw<{ tablename: string }[]>`
+      SELECT tablename::text FROM pg_tables
+      WHERE schemaname = 'public' AND tablename NOT LIKE '\\_prisma\\_%'`;
+    return rows.map((r) => `"public"."${r.tablename}"`);
+  })();
+  return tablesPromise;
 }
 
 export async function resetDatabase() {

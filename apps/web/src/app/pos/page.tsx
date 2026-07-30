@@ -30,7 +30,9 @@ export default function PosPage() {
   const scanTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    api<Product[]>('/catalog/products').then(setProducts).catch(() => setToast('Working offline — cached catalog'));
+    api<Product[]>('/catalog/products')
+      .then(setProducts)
+      .catch(() => setToast('Working offline — cached catalog'));
     setOnline(navigator.onLine);
     const on = () => setOnline(true);
     const off = () => setOnline(false);
@@ -50,7 +52,11 @@ export default function PosPage() {
       const idx = prev.findIndex((l) => l.variantId === v.id);
       if (idx >= 0) {
         const next = [...prev];
-        next[idx] = { ...next[idx], qty: next[idx].qty + 1, taxAmount: taxFor(next[idx].unitPrice, next[idx].qty + 1) };
+        next[idx] = {
+          ...next[idx],
+          qty: next[idx].qty + 1,
+          taxAmount: taxFor(next[idx].unitPrice, next[idx].qty + 1),
+        };
         return next;
       }
       return [
@@ -72,7 +78,8 @@ export default function PosPage() {
   // Barcode scanner (keyboard wedge): scanners type fast + end with Enter.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
+      if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA')
+        return;
       if (e.key === 'Enter' && scanBuffer.current.length >= 6) {
         const code = scanBuffer.current;
         scanBuffer.current = '';
@@ -109,7 +116,10 @@ export default function PosPage() {
   }, [cart]);
 
   const filtered = products.filter(
-    (p) => !search || p.name.toLowerCase().includes(search.toLowerCase()) || p.variants.some((v) => v.sku.includes(search)),
+    (p) =>
+      !search ||
+      p.name.toLowerCase().includes(search.toLowerCase()) ||
+      p.variants.some((v) => v.sku.includes(search)),
   );
 
   async function completeSale(tender: TenderType, tendered: number, reference?: string) {
@@ -127,7 +137,10 @@ export default function PosPage() {
     };
     let orderNo = `LOCAL-${order.idempotencyKey.slice(0, 8)}`;
     try {
-      const res = await api<{ order: { orderNo: string } }>('/orders', { method: 'POST', body: JSON.stringify(order) });
+      const res = await api<{ order: { orderNo: string } }>('/orders', {
+        method: 'POST',
+        body: JSON.stringify(order),
+      });
       orderNo = res.order.orderNo;
     } catch {
       enqueue({ ...order, offline: true });
@@ -156,13 +169,19 @@ export default function PosPage() {
           <strong>EIAAW POS · Counter 1</strong>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             {pending > 0 && <span className="badge badge-off">{pending} queued</span>}
-            <span className={`badge ${online ? 'badge-on' : 'badge-off'}`}>{online ? 'ONLINE' : 'OFFLINE — still selling'}</span>
+            <span className={`badge ${online ? 'badge-on' : 'badge-off'}`}>
+              {online ? 'ONLINE' : 'OFFLINE — still selling'}
+            </span>
             <a href="/dashboard">Dashboard</a>
             <a href="/import">AI Import</a>
           </div>
         </div>
         <div style={{ padding: 14 }}>
-          <input placeholder="Search or scan barcode… (scanner works anywhere on this page)" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <input
+            placeholder="Search or scan barcode… (scanner works anywhere on this page)"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
         </div>
         <div className="grid-tiles" style={{ padding: '0 14px 14px', overflowY: 'auto' }}>
           {filtered.flatMap((p) =>
@@ -170,7 +189,9 @@ export default function PosPage() {
               <button key={v.id} className="tile" onClick={() => addVariant(p, v)}>
                 <div style={{ fontWeight: 700, marginBottom: 6 }}>{v.name}</div>
                 <div className="muted">{v.sku}</div>
-                <div style={{ color: 'var(--accent)', fontWeight: 700, marginTop: 6 }}>{MONEY.fmt(v.price)}</div>
+                <div style={{ color: 'var(--accent)', fontWeight: 700, marginTop: 6 }}>
+                  {MONEY.fmt(v.price)}
+                </div>
               </button>
             )),
           )}
@@ -182,14 +203,58 @@ export default function PosPage() {
           <h2 style={{ fontSize: 16, marginBottom: 10 }}>Cart</h2>
           {cart.length === 0 && <p className="muted">Scan or tap items to begin.</p>}
           {cart.map((l, i) => (
-            <div key={l.variantId} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--panel2)' }}>
+            <div
+              key={l.variantId}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                padding: '8px 0',
+                borderBottom: '1px solid var(--panel2)',
+              }}
+            >
               <div>
                 <div>{l.name}</div>
                 <div className="muted">
-                  <button className="btn-ghost" style={{ padding: '2px 10px' }} onClick={() => setCart((c) => c.map((x, j) => (j === i ? { ...x, qty: Math.max(1, x.qty - 1), taxAmount: taxFor(x.unitPrice, Math.max(1, x.qty - 1)) } : x)))}>−</button>
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: '2px 10px' }}
+                    onClick={() =>
+                      setCart((c) =>
+                        c.map((x, j) =>
+                          j === i
+                            ? {
+                                ...x,
+                                qty: Math.max(1, x.qty - 1),
+                                taxAmount: taxFor(x.unitPrice, Math.max(1, x.qty - 1)),
+                              }
+                            : x,
+                        ),
+                      )
+                    }
+                  >
+                    −
+                  </button>
                   <span style={{ margin: '0 8px' }}>{l.qty}</span>
-                  <button className="btn-ghost" style={{ padding: '2px 10px' }} onClick={() => setCart((c) => c.map((x, j) => (j === i ? { ...x, qty: x.qty + 1, taxAmount: taxFor(x.unitPrice, x.qty + 1) } : x)))}>+</button>
-                  <button className="btn-red" style={{ padding: '2px 10px', marginLeft: 8 }} onClick={() => setCart((c) => c.filter((_, j) => j !== i))}>×</button>
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: '2px 10px' }}
+                    onClick={() =>
+                      setCart((c) =>
+                        c.map((x, j) =>
+                          j === i ? { ...x, qty: x.qty + 1, taxAmount: taxFor(x.unitPrice, x.qty + 1) } : x,
+                        ),
+                      )
+                    }
+                  >
+                    +
+                  </button>
+                  <button
+                    className="btn-red"
+                    style={{ padding: '2px 10px', marginLeft: 8 }}
+                    onClick={() => setCart((c) => c.filter((_, j) => j !== i))}
+                  >
+                    ×
+                  </button>
                 </div>
               </div>
               <strong>{MONEY.fmt(l.unitPrice * l.qty - l.discount)}</strong>
@@ -200,13 +265,20 @@ export default function PosPage() {
           <Row label="Subtotal" value={MONEY.fmt(totals.subtotal)} />
           <Row label="SST (incl.)" value={MONEY.fmt(totals.tax)} muted />
           <Row label="TOTAL" value={MONEY.fmt(totals.beforeRounding)} big />
-          <button className="btn-green" style={{ width: '100%', marginTop: 12, fontSize: 18 }} disabled={!cart.length} onClick={() => setPayOpen(true)}>
+          <button
+            className="btn-green"
+            style={{ width: '100%', marginTop: 12, fontSize: 18 }}
+            disabled={!cart.length}
+            onClick={() => setPayOpen(true)}
+          >
             Charge {MONEY.fmt(totals.beforeRounding)}
           </button>
         </div>
       </aside>
 
-      {payOpen && <PayModal total={totals.beforeRounding} onDone={completeSale} onClose={() => setPayOpen(false)} />}
+      {payOpen && (
+        <PayModal total={totals.beforeRounding} onDone={completeSale} onClose={() => setPayOpen(false)} />
+      )}
       {toast && <Toast msg={toast} onDone={() => setToast('')} />}
     </main>
   );
@@ -219,7 +291,16 @@ function taxFor(unitPrice: number, qty: number) {
 
 function Row({ label, value, big, muted }: { label: string; value: string; big?: boolean; muted?: boolean }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: big ? 20 : 14, fontWeight: big ? 800 : 400, color: muted ? 'var(--muted)' : undefined }}>
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        padding: '3px 0',
+        fontSize: big ? 20 : 14,
+        fontWeight: big ? 800 : 400,
+        color: muted ? 'var(--muted)' : undefined,
+      }}
+    >
       <span>{label}</span>
       <span>{value}</span>
     </div>
@@ -232,11 +313,30 @@ function Toast({ msg, onDone }: { msg: string; onDone: () => void }) {
     return () => clearTimeout(t);
   }, [msg, onDone]);
   return (
-    <div style={{ position: 'fixed', bottom: 20, left: 20, background: 'var(--panel2)', padding: '10px 16px', borderRadius: 10 }}>{msg}</div>
+    <div
+      style={{
+        position: 'fixed',
+        bottom: 20,
+        left: 20,
+        background: 'var(--panel2)',
+        padding: '10px 16px',
+        borderRadius: 10,
+      }}
+    >
+      {msg}
+    </div>
   );
 }
 
-function PayModal({ total, onDone, onClose }: { total: number; onDone: (t: TenderType, tendered: number, ref?: string) => void; onClose: () => void }) {
+function PayModal({
+  total,
+  onDone,
+  onClose,
+}: {
+  total: number;
+  onDone: (t: TenderType, tendered: number, ref?: string) => void;
+  onClose: () => void;
+}) {
   const [mode, setMode] = useState<'MENU' | 'CASH' | 'QR' | 'CARD'>('MENU');
   const [tendered, setTendered] = useState('');
   const [qr, setQr] = useState<{ qrPayload?: string; providerRef: string } | null>(null);
@@ -249,7 +349,12 @@ function PayModal({ total, onDone, onClose }: { total: number; onDone: (t: Tende
     setMode('QR');
     const res = await api<{ qrPayload?: string; providerRef: string }>('/payments/intent', {
       method: 'POST',
-      body: JSON.stringify({ tender, amount: total, orderRef: crypto.randomUUID().slice(0, 8), idempotencyKey: crypto.randomUUID() }),
+      body: JSON.stringify({
+        tender,
+        amount: total,
+        orderRef: crypto.randomUUID().slice(0, 8),
+        idempotencyKey: crypto.randomUUID(),
+      }),
     });
     setQr(res);
     const poll = setInterval(async () => {
@@ -262,36 +367,74 @@ function PayModal({ total, onDone, onClose }: { total: number; onDone: (t: Tende
   }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', display: 'grid', placeItems: 'center' }} onClick={onClose}>
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.6)',
+        display: 'grid',
+        placeItems: 'center',
+      }}
+      onClick={onClose}
+    >
       <div className="card" style={{ width: 440 }} onClick={(e) => e.stopPropagation()}>
         <h2 style={{ marginBottom: 4 }}>Take payment</h2>
-        <p className="muted" style={{ marginBottom: 14 }}>Total {MONEY.fmt(total)}</p>
+        <p className="muted" style={{ marginBottom: 14 }}>
+          Total {MONEY.fmt(total)}
+        </p>
 
         {mode === 'MENU' && (
           <div style={{ display: 'grid', gap: 10 }}>
-            <button className="btn-green" onClick={() => setMode('CASH')}>Cash (rounded {MONEY.fmt(rounded)})</button>
-            <button className="btn" onClick={() => startQr('DUITNOW_QR')}>DuitNow QR</button>
+            <button className="btn-green" onClick={() => setMode('CASH')}>
+              Cash (rounded {MONEY.fmt(rounded)})
+            </button>
+            <button className="btn" onClick={() => startQr('DUITNOW_QR')}>
+              DuitNow QR
+            </button>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-              <button className="btn-ghost" onClick={() => startQr('EWALLET_TNG')}>TNG</button>
-              <button className="btn-ghost" onClick={() => startQr('EWALLET_GRABPAY')}>GrabPay</button>
-              <button className="btn-ghost" onClick={() => startQr('EWALLET_BOOST')}>Boost</button>
+              <button className="btn-ghost" onClick={() => startQr('EWALLET_TNG')}>
+                TNG
+              </button>
+              <button className="btn-ghost" onClick={() => startQr('EWALLET_GRABPAY')}>
+                GrabPay
+              </button>
+              <button className="btn-ghost" onClick={() => startQr('EWALLET_BOOST')}>
+                Boost
+              </button>
             </div>
-            <button className="btn-ghost" onClick={() => setMode('CARD')}>Card terminal (manual entry)</button>
+            <button className="btn-ghost" onClick={() => setMode('CARD')}>
+              Card terminal (manual entry)
+            </button>
           </div>
         )}
 
         {mode === 'CASH' && (
           <div style={{ display: 'grid', gap: 10 }}>
-            <input autoFocus type="number" step="0.05" placeholder="Amount tendered (RM)" value={tendered} onChange={(e) => setTendered(e.target.value)} />
+            <input
+              autoFocus
+              type="number"
+              step="0.05"
+              placeholder="Amount tendered (RM)"
+              value={tendered}
+              onChange={(e) => setTendered(e.target.value)}
+            />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
               {[rounded, Math.ceil(rounded / 1000) * 1000, Math.ceil(rounded / 5000) * 5000].map((v, i) => (
-                <button key={i} className="btn-ghost" onClick={() => setTendered((v / 100).toFixed(2))}>{MONEY.fmt(v)}</button>
+                <button key={i} className="btn-ghost" onClick={() => setTendered((v / 100).toFixed(2))}>
+                  {MONEY.fmt(v)}
+                </button>
               ))}
             </div>
             {tendered && Number(tendered) * 100 >= rounded && (
-              <p style={{ fontSize: 18 }}>Change: <strong>{MONEY.fmt(Number(tendered) * 100 - rounded)}</strong></p>
+              <p style={{ fontSize: 18 }}>
+                Change: <strong>{MONEY.fmt(Number(tendered) * 100 - rounded)}</strong>
+              </p>
             )}
-            <button className="btn-green" disabled={!tendered || Number(tendered) * 100 < rounded} onClick={() => onDone('CASH', Math.round(Number(tendered) * 100))}>
+            <button
+              className="btn-green"
+              disabled={!tendered || Number(tendered) * 100 < rounded}
+              onClick={() => onDone('CASH', Math.round(Number(tendered) * 100))}
+            >
               Complete & print receipt
             </button>
           </div>
@@ -301,9 +444,20 @@ function PayModal({ total, onDone, onClose }: { total: number; onDone: (t: Tende
           <div style={{ textAlign: 'center', display: 'grid', gap: 10 }}>
             {qr?.qrPayload ? (
               <>
-                <div style={{ background: '#fff', color: '#000', padding: 16, borderRadius: 12, fontSize: 10, wordBreak: 'break-all' }}>
+                <div
+                  style={{
+                    background: '#fff',
+                    color: '#000',
+                    padding: 16,
+                    borderRadius: 12,
+                    fontSize: 10,
+                    wordBreak: 'break-all',
+                  }}
+                >
                   {qr.qrPayload}
-                  <p style={{ marginTop: 8, fontWeight: 700 }}>[Dynamic {qrTender.replace('EWALLET_', '')} QR renders here]</p>
+                  <p style={{ marginTop: 8, fontWeight: 700 }}>
+                    [Dynamic {qrTender.replace('EWALLET_', '')} QR renders here]
+                  </p>
                 </div>
                 <p className="muted">Waiting for customer to scan & pay… (mock auto-confirms in ~5s)</p>
               </>
@@ -315,13 +469,29 @@ function PayModal({ total, onDone, onClose }: { total: number; onDone: (t: Tende
 
         {mode === 'CARD' && (
           <div style={{ display: 'grid', gap: 10 }}>
-            <p className="muted">Charge {MONEY.fmt(total)} on the bank terminal, then record the approval code. (No card number is ever entered or stored.)</p>
-            <input autoFocus placeholder="Approval code / last 4 digits" value={cardRef} onChange={(e) => setCardRef(e.target.value)} />
-            <button className="btn-green" disabled={!cardRef} onClick={() => onDone('CARD_MANUAL', total, cardRef)}>Complete & print receipt</button>
+            <p className="muted">
+              Charge {MONEY.fmt(total)} on the bank terminal, then record the approval code. (No card number
+              is ever entered or stored.)
+            </p>
+            <input
+              autoFocus
+              placeholder="Approval code / last 4 digits"
+              value={cardRef}
+              onChange={(e) => setCardRef(e.target.value)}
+            />
+            <button
+              className="btn-green"
+              disabled={!cardRef}
+              onClick={() => onDone('CARD_MANUAL', total, cardRef)}
+            >
+              Complete & print receipt
+            </button>
           </div>
         )}
 
-        <button className="btn-ghost" style={{ width: '100%', marginTop: 12 }} onClick={onClose}>Cancel</button>
+        <button className="btn-ghost" style={{ width: '100%', marginTop: 12 }} onClick={onClose}>
+          Cancel
+        </button>
       </div>
     </div>
   );

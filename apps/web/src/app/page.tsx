@@ -34,9 +34,16 @@ export default function LoginPage() {
           <p className="muted">AI-native Point of Sale — sign in</p>
         </div>
         <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
-        <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
         {error && <p style={{ color: 'var(--red)', fontSize: 13 }}>{error}</p>}
-        <button className="btn" type="submit">Sign in</button>
+        <button className="btn" type="submit">
+          Sign in
+        </button>
         <p className="muted">Terminal · Dashboard · Back-office</p>
       </form>
     </main>

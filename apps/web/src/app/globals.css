@@ -1,25 +1,130 @@
-* { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg: #0f172a; --panel: #1e293b; --panel2: #334155; --text: #f1f5f9;
-  --muted: #94a3b8; --accent: #38bdf8; --green: #22c55e; --red: #ef4444; --amber: #f59e0b;
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
-body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
-a { color: var(--accent); text-decoration: none; }
-button { cursor: pointer; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; }
-input, textarea, select { border-radius: 8px; border: 1px solid var(--panel2); background: var(--panel); color: var(--text); padding: 10px 12px; font-size: 15px; width: 100%; }
-.btn { padding: 12px 18px; background: var(--accent); color: #082f49; }
-.btn-ghost { padding: 12px 18px; background: var(--panel2); color: var(--text); }
-.btn-green { padding: 14px 18px; background: var(--green); color: #052e16; }
-.btn-red { padding: 12px 18px; background: var(--red); color: #fff; }
-.card { background: var(--panel); border-radius: 14px; padding: 18px; }
-.muted { color: var(--muted); font-size: 13px; }
-.grid-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
-.tile { background: var(--panel); border-radius: 12px; padding: 14px; text-align: left; color: var(--text); border: 1px solid var(--panel2); }
-.tile:hover { border-color: var(--accent); }
-.topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--panel); }
-.badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
-.badge-on { background: #14532d; color: #86efac; }
-.badge-off { background: #7f1d1d; color: #fecaca; }
-table.tbl { width: 100%; border-collapse: collapse; }
-table.tbl th, table.tbl td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--panel2); font-size: 14px; }
-table.tbl th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel2: #334155;
+  --text: #f1f5f9;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --green: #22c55e;
+  --red: #ef4444;
+  --amber: #f59e0b;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+input,
+textarea,
+select {
+  border-radius: 8px;
+  border: 1px solid var(--panel2);
+  background: var(--panel);
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 15px;
+  width: 100%;
+}
+.btn {
+  padding: 12px 18px;
+  background: var(--accent);
+  color: #082f49;
+}
+.btn-ghost {
+  padding: 12px 18px;
+  background: var(--panel2);
+  color: var(--text);
+}
+.btn-green {
+  padding: 14px 18px;
+  background: var(--green);
+  color: #052e16;
+}
+.btn-red {
+  padding: 12px 18px;
+  background: var(--red);
+  color: #fff;
+}
+.card {
+  background: var(--panel);
+  border-radius: 14px;
+  padding: 18px;
+}
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+.grid-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.tile {
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 14px;
+  text-align: left;
+  color: var(--text);
+  border: 1px solid var(--panel2);
+}
+.tile:hover {
+  border-color: var(--accent);
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: var(--panel);
+}
+.badge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.badge-on {
+  background: #14532d;
+  color: #86efac;
+}
+.badge-off {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+table.tbl {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.tbl th,
+table.tbl td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--panel2);
+  font-size: 14px;
+}
+table.tbl th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+}

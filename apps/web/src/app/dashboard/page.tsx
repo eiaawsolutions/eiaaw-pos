@@ -4,8 +4,18 @@ import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { MONEY, type DashboardStats } from '@eiaaw/shared';
 import {
-  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, BarChart, Bar,
-  PieChart, Pie, Cell, CartesianGrid,
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  BarChart,
+  Bar,
+  PieChart,
+  Pie,
+  Cell,
+  CartesianGrid,
 } from 'recharts';
 
 const COLORS = ['#38bdf8', '#22c55e', '#f59e0b', '#8b5cf6', '#ef4444', '#14b8a6'];
@@ -15,16 +25,35 @@ export default function DashboardPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    const load = () => api<DashboardStats>('/reports/dashboard').then(setStats).catch((e) => setError(e.message));
+    const load = () =>
+      api<DashboardStats>('/reports/dashboard')
+        .then(setStats)
+        .catch((e) => setError(e.message));
     load();
     const id = setInterval(load, 15_000); // live refresh
     return () => clearInterval(id);
   }, []);
 
-  if (error) return <main style={{ padding: 24 }}><p style={{ color: 'var(--red)' }}>{error} — <a href="/">sign in</a></p></main>;
-  if (!stats) return <main style={{ padding: 24 }}><p className="muted">Loading dashboard…</p></main>;
+  if (error)
+    return (
+      <main style={{ padding: 24 }}>
+        <p style={{ color: 'var(--red)' }}>
+          {error} — <a href="/">sign in</a>
+        </p>
+      </main>
+    );
+  if (!stats)
+    return (
+      <main style={{ padding: 24 }}>
+        <p className="muted">Loading dashboard…</p>
+      </main>
+    );
 
-  const hourly = stats.hourlySales.map((h) => ({ ...h, label: new Date(h.hour).getHours() + ':00', rm: h.sales / 100 }));
+  const hourly = stats.hourlySales.map((h) => ({
+    ...h,
+    label: new Date(h.hour).getHours() + ':00',
+    rm: h.sales / 100,
+  }));
   const daily = stats.salesByDay.map((d) => ({ ...d, rm: d.sales / 100, label: d.date.slice(5) }));
   const tenders = stats.tenderMix.map((t) => ({ name: t.tender, value: t.amount / 100 }));
   const top = stats.topProducts.map((t) => ({ ...t, rm: t.sales / 100 }));
@@ -53,7 +82,10 @@ export default function DashboardPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
               <XAxis dataKey="label" stroke="#94a3b8" />
               <YAxis stroke="#94a3b8" />
-              <Tooltip formatter={(v: any) => `RM ${Number(v).toFixed(2)}`} contentStyle={{ background: '#1e293b', border: 'none' }} />
+              <Tooltip
+                formatter={(v: any) => `RM ${Number(v).toFixed(2)}`}
+                contentStyle={{ background: '#1e293b', border: 'none' }}
+              />
               <Area dataKey="rm" stroke="#38bdf8" fill="#38bdf8" fillOpacity={0.25} name="Sales" />
             </AreaChart>
           </ResponsiveContainer>
@@ -62,10 +94,22 @@ export default function DashboardPage() {
           <h3 style={{ marginBottom: 10 }}>Tender mix (today)</h3>
           <ResponsiveContainer width="100%" height={240}>
             <PieChart>
-              <Pie data={tenders} dataKey="value" nameKey="name" innerRadius={50} outerRadius={85} label={(e: any) => e.name}>
-                {tenders.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+              <Pie
+                data={tenders}
+                dataKey="value"
+                nameKey="name"
+                innerRadius={50}
+                outerRadius={85}
+                label={(e: any) => e.name}
+              >
+                {tenders.map((_, i) => (
+                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                ))}
               </Pie>
-              <Tooltip formatter={(v: any) => `RM ${Number(v).toFixed(2)}`} contentStyle={{ background: '#1e293b', border: 'none' }} />
+              <Tooltip
+                formatter={(v: any) => `RM ${Number(v).toFixed(2)}`}
+                contentStyle={{ background: '#1e293b', border: 'none' }}
+              />
             </PieChart>
           </ResponsiveContainer>
         </div>
@@ -78,7 +122,10 @@ export default function DashboardPage() {
             <BarChart data={top} layout="vertical">
               <XAxis type="number" stroke="#94a3b8" />
               <YAxis type="category" dataKey="name" width={140} stroke="#94a3b8" />
-              <Tooltip formatter={(v: any) => `RM ${Number(v).toFixed(2)}`} contentStyle={{ background: '#1e293b', border: 'none' }} />
+              <Tooltip
+                formatter={(v: any) => `RM ${Number(v).toFixed(2)}`}
+                contentStyle={{ background: '#1e293b', border: 'none' }}
+              />
               <Bar dataKey="rm" fill="#22c55e" name="Sales" />
             </BarChart>
           </ResponsiveContainer>
@@ -90,13 +137,19 @@ export default function DashboardPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
               <XAxis dataKey="label" stroke="#94a3b8" />
               <YAxis stroke="#94a3b8" />
-              <Tooltip formatter={(v: any) => `RM ${Number(v).toFixed(2)}`} contentStyle={{ background: '#1e293b', border: 'none' }} />
+              <Tooltip
+                formatter={(v: any) => `RM ${Number(v).toFixed(2)}`}
+                contentStyle={{ background: '#1e293b', border: 'none' }}
+              />
               <Bar dataKey="rm" fill="#8b5cf6" name="Sales" />
             </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
-      <p className="muted">Auto-refreshes every 15s · Interactive drill-downs, date filters and AI natural-language analytics land in v1.0.</p>
+      <p className="muted">
+        Auto-refreshes every 15s · Interactive drill-downs, date filters and AI natural-language analytics
+        land in v1.0.
+      </p>
     </main>
   );
 }

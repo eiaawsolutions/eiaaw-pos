@@ -49,7 +49,10 @@ export class ReportsService {
         orders: Number(h.orders),
       })),
       topProducts: top.map((t) => ({ name: t.name, qty: Number(t.qty), sales: Number(t.sales) })),
-      salesByDay: byDay.map((d) => ({ date: new Date(d.date).toISOString().slice(0, 10), sales: Number(d.sales) })),
+      salesByDay: byDay.map((d) => ({
+        date: new Date(d.date).toISOString().slice(0, 10),
+        sales: Number(d.sales),
+      })),
     };
   }
 
@@ -60,7 +63,11 @@ export class ReportsService {
     end.setDate(end.getDate() + 1);
     const where = { outletId, status: 'COMPLETED', createdAt: { gte: start, lt: end } };
     const [orders, tax, voids, refundsLegs] = await Promise.all([
-      this.prisma.order.aggregate({ where, _sum: { total: true, discountTotal: true, taxTotal: true }, _count: true }),
+      this.prisma.order.aggregate({
+        where,
+        _sum: { total: true, discountTotal: true, taxTotal: true },
+        _count: true,
+      }),
       this.prisma.order.aggregate({ where, _sum: { taxTotal: true } }),
       this.prisma.order.count({ where: { outletId, status: 'VOIDED', createdAt: { gte: start, lt: end } } }),
       this.prisma.ledgerEntry.aggregate({

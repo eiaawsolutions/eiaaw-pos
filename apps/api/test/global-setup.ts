@@ -27,8 +27,7 @@ export default async function globalSetup() {
   // is not explicitly a test database.
   if (!/test/i.test(dbName)) {
     throw new Error(
-      `Refusing to run destructive tests against database "${dbName}" — ` +
-        'the name must contain "test".',
+      `Refusing to run destructive tests against database "${dbName}" — ` + 'the name must contain "test".',
     );
   }
 

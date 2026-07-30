@@ -20,7 +20,11 @@ export class PaymentsController {
 
   // Public webhook sink (signature-verified inside)
   @Post('webhook/:provider')
-  webhook(@Param('provider') provider: string, @Headers() headers: Record<string, string>, @Body() body: any) {
+  webhook(
+    @Param('provider') provider: string,
+    @Headers() headers: Record<string, string>,
+    @Body() body: any,
+  ) {
     return this.payments.webhook(provider, headers, JSON.stringify(body ?? {}));
   }
 

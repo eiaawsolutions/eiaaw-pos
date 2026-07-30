@@ -1,42 +1,59 @@
-# EXAMPLE USAGE:
+# Write-time quality gates.
 #
-#   Refer for explanation to following link:
-#   https://lefthook.dev/configuration/
+# Split by cost: pre-commit runs only on staged files and must stay fast enough
+# that nobody reaches for --no-verify. Pre-push runs the whole gate, because a
+# broken main branch costs everyone.
 #
-# pre-push:
-#   jobs:
-#     - name: packages audit
-#       tags:
-#         - frontend
-#         - security
-#       run: yarn audit
-#
-#     - name: gems audit
-#       tags:
-#         - backend
-#         - security
-#       run: bundle audit
-#
-# pre-commit:
-#   parallel: true
-#   jobs:
-#     - run: yarn eslint {staged_files}
-#       glob: "*.{js,ts,jsx,tsx}"
-#
-#     - name: rubocop
-#       glob: "*.rb"
-#       exclude:
-#         - config/application.rb
-#         - config/routes.rb
-#       run: bundle exec rubocop --force-exclusion {all_files}
-#
-#     - name: govet
-#       files: git ls-files -m
-#       glob: "*.go"
-#       run: go vet {files}
-#
-#     - script: "hello.js"
-#       runner: node
-#
-#     - script: "hello.go"
-#       runner: go run
+# Skip one job with LEFTHOOK_EXCLUDE=<name>; skip everything with LEFTHOOK=0.
+# Both leave a trace in shell history, unlike --no-verify.
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: secrets
+      # Not glob-scoped: this must see every staged file, including the ones
+      # the other jobs skip.
+      run: node scripts/scan-secrets.mjs
+      skip:
+        - merge
+        - rebase
+
+    - name: format
+      glob: '*.{ts,tsx,js,mjs,cjs,json,css,yml,yaml}'
+      run: npx prettier --check {staged_files}
+      fail_text: 'Formatting. Run `npm run format` and stage the result.'
+
+    - name: lint
+      glob: '*.{ts,tsx,js,mjs,cjs}'
+      run: npx eslint {staged_files}
+      fail_text: 'Lint errors. Run `npm run lint:fix`.'
+
+pre-push:
+  parallel: false
+  jobs:
+    - name: typecheck
+      run: npm run typecheck
+      fail_text: 'Type errors — fix before pushing.'
+
+    - name: test
+      run: npm test
+      fail_text: |
+        Tests failing. If this is the integration suite, check the database is up:
+          docker compose -f docker-compose.dev.yml up -d
+
+    - name: audit
+      # Production dependencies only. The dev toolchain carries advisories that
+      # cannot be pinned without breaking ESLint — its minimatch expects the old
+      # brace-expansion export shape — and a linter's glob parser is not part of
+      # the deployed attack surface. Shipped code is held to a clean bill.
+      run: npm audit --omit=dev --audit-level=high
+      fail_text: 'A production dependency has a high-severity advisory.'
+
+commit-msg:
+  jobs:
+    - name: conventional
+      run: npx commitlint --edit {1}
+      fail_text: |
+        Commit messages follow Conventional Commits:
+          feat(orders): re-price server-side from the catalog
+          fix(shifts): scope cash-up to the register that opened the shift

@@ -127,10 +127,28 @@ export class OrdersService {
         })),
         { txnId, account: 'SALES', debit: 0, credit: netSales, refType: 'ORDER', refId: created.id },
         ...(taxTotal > 0
-          ? [{ txnId, account: 'TAX_PAYABLE', debit: 0, credit: taxTotal, refType: 'ORDER', refId: created.id }]
+          ? [
+              {
+                txnId,
+                account: 'TAX_PAYABLE',
+                debit: 0,
+                credit: taxTotal,
+                refType: 'ORDER',
+                refId: created.id,
+              },
+            ]
           : []),
         ...(paid > total
-          ? [{ txnId, account: 'TENDER_CASH', debit: 0, credit: paid - total, refType: 'ORDER', refId: created.id }] // change given
+          ? [
+              {
+                txnId,
+                account: 'TENDER_CASH',
+                debit: 0,
+                credit: paid - total,
+                refType: 'ORDER',
+                refId: created.id,
+              },
+            ] // change given
           : []),
       ];
       await tx.ledgerEntry.createMany({ data: legs });
@@ -165,7 +183,10 @@ export class OrdersService {
   /** Void — manager-gated at controller level; restocks and reverses ledger */
   async void(id: string, userId: string, reason: string) {
     return this.prisma.$transaction(async (tx) => {
-      const order = await tx.order.findUniqueOrThrow({ where: { id }, include: { lines: true, payments: true } });
+      const order = await tx.order.findUniqueOrThrow({
+        where: { id },
+        include: { lines: true, payments: true },
+      });
       if (order.status !== 'COMPLETED') throw new BadRequestException('Only completed orders can be voided');
       await tx.order.update({ where: { id }, data: { status: 'VOIDED' } });
       for (const l of order.lines) {
@@ -174,15 +195,38 @@ export class OrdersService {
           data: { onHand: { increment: l.qty } },
         });
         await tx.stockMovement.create({
-          data: { outletId: order.outletId, variantId: l.variantId, qty: l.qty, type: 'REFUND', refId: id, reason },
+          data: {
+            outletId: order.outletId,
+            variantId: l.variantId,
+            qty: l.qty,
+            type: 'REFUND',
+            refId: id,
+            reason,
+          },
         });
       }
       const txnId = randomUUID();
       await tx.ledgerEntry.createMany({
         data: [
-          { txnId, account: 'REFUNDS', debit: order.total - order.taxTotal, credit: 0, refType: 'REFUND', refId: id },
+          {
+            txnId,
+            account: 'REFUNDS',
+            debit: order.total - order.taxTotal,
+            credit: 0,
+            refType: 'REFUND',
+            refId: id,
+          },
           ...(order.taxTotal > 0
-            ? [{ txnId, account: 'TAX_PAYABLE', debit: order.taxTotal, credit: 0, refType: 'REFUND', refId: id }]
+            ? [
+                {
+                  txnId,
+                  account: 'TAX_PAYABLE',
+                  debit: order.taxTotal,
+                  credit: 0,
+                  refType: 'REFUND',
+                  refId: id,
+                },
+              ]
             : []),
           ...order.payments.map((p) => ({
             txnId,

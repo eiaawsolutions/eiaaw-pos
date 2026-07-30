@@ -18,7 +18,10 @@ export class ShiftsController {
   }
 
   @Post('cash-movement')
-  cashMovement(@Body() body: { shiftId: string; type: string; amount: number; reason?: string }, @Req() req: any) {
+  cashMovement(
+    @Body() body: { shiftId: string; type: string; amount: number; reason?: string },
+    @Req() req: any,
+  ) {
     return this.shifts.cashMovement({ ...body, userId: req.user.sub });
   }
 
