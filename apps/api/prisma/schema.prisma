@@ -26,22 +26,45 @@ model Outlet {
   address   String?
   sstNo     String?
   tin       String? // LHDN taxpayer identification (MyInvois)
+  // IANA zone. The trading day is the outlet's, not the server's: on a UTC
+  // host a naive local date rolls the Malaysian day over at 08:00, mid-rush.
+  timezone  String   @default("Asia/Kuala_Lumpur")
   createdAt DateTime @default(now())
 
   registers Register[]
   inventory InventoryLevel[]
   orders    Order[]
   shifts    Shift[]
+  sequences OrderSequence[]
+}
+
+// One row per outlet per trading day, incremented atomically to allocate the
+// next receipt number. A `COUNT(*) + 1` cannot do this: two terminals reading
+// the same count both build the same number and one loses the unique index —
+// a failed sale at the counter, at exactly the busiest moment.
+//
+// Allocation happens inside the order transaction, so a rolled-back order
+// returns its number rather than leaving a gap. Gaps in a receipt sequence are
+// a question an auditor gets to ask; the cost is that concurrent orders for one
+// outlet serialise on this row for the length of the transaction.
+model OrderSequence {
+  id           String @id @default(cuid())
+  outletId     String
+  outlet       Outlet @relation(fields: [outletId], references: [id])
+  businessDate String // YYYY-MM-DD in the outlet's timezone
+  lastValue    Int    @default(0)
+
+  @@unique([outletId, businessDate])
 }
 
 model Register {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   name      String
   outletId  String
-  outlet    Outlet   @relation(fields: [outletId], references: [id])
-  deviceKey String   @unique @default(cuid()) // device registration token
+  outlet    Outlet    @relation(fields: [outletId], references: [id])
+  deviceKey String    @unique @default(cuid()) // device registration token
   lastSeen  DateTime?
-  eventMode Boolean  @default(false)
+  eventMode Boolean   @default(false)
 
   orders Order[]
   shifts Shift[]
@@ -89,15 +112,15 @@ model Product {
 }
 
 model Variant {
-  id        String   @id @default(cuid())
-  productId String
-  product   Product  @relation(fields: [productId], references: [id])
-  sku       String   @unique
-  name      String // e.g. "Red / L" or same as product for single-variant
-  price     Int // sen
-  cost      Int      @default(0) // sen, moving average
+  id         String  @id @default(cuid())
+  productId  String
+  product    Product @relation(fields: [productId], references: [id])
+  sku        String  @unique
+  name       String // e.g. "Red / L" or same as product for single-variant
+  price      Int // sen
+  cost       Int     @default(0) // sen, moving average
   trackStock Boolean @default(true)
-  active    Boolean  @default(true)
+  active     Boolean @default(true)
 
   barcodes   Barcode[]
   inventory  InventoryLevel[]
@@ -159,27 +182,32 @@ model Customer {
 // ── Orders & payments ─────────────────────────────────────────────────────────
 
 model Order {
-  id                 String   @id @default(cuid())
-  orderNo            String   @unique
-  idempotencyKey     String   @unique
+  id                 String    @id @default(cuid())
+  orderNo            String    @unique
+  idempotencyKey     String    @unique
   outletId           String
-  outlet             Outlet   @relation(fields: [outletId], references: [id])
+  outlet             Outlet    @relation(fields: [outletId], references: [id])
   registerId         String?
   register           Register? @relation(fields: [registerId], references: [id])
   staffId            String?
-  staff              User?    @relation(fields: [staffId], references: [id])
+  staff              User?     @relation(fields: [staffId], references: [id])
   customerId         String?
   customer           Customer? @relation(fields: [customerId], references: [id])
+  // The shift that was open on this register when the sale landed. Null means
+  // the sale happened outside any shift — it can never be cashed up, which is
+  // exactly why the order path audits that case.
+  shiftId            String?
+  shift              Shift?    @relation(fields: [shiftId], references: [id])
   eventId            String?
-  status             String   @default("COMPLETED") // OPEN|HELD|COMPLETED|VOIDED|REFUNDED|PARTIAL_REFUND
+  status             String    @default("COMPLETED") // OPEN|HELD|COMPLETED|VOIDED|REFUNDED|PARTIAL_REFUND
   subtotal           Int
-  discountTotal      Int      @default(0)
-  taxTotal           Int      @default(0)
-  roundingAdjustment Int      @default(0)
+  discountTotal      Int       @default(0)
+  taxTotal           Int       @default(0)
+  roundingAdjustment Int       @default(0)
   total              Int
-  offline            Boolean  @default(false)
-  placedAt           DateTime @default(now()) // device time
-  createdAt          DateTime @default(now()) // server time
+  offline            Boolean   @default(false)
+  placedAt           DateTime  @default(now()) // device time
+  createdAt          DateTime  @default(now()) // server time
 
   lines    OrderLine[]
   payments Payment[]
@@ -222,36 +250,53 @@ model Payment {
 
 // Append-only double-entry ledger
 model LedgerEntry {
-  id        String   @id @default(cuid())
-  txnId     String // groups the two legs
-  account   String // SALES | TENDER_CASH | TENDER_DUITNOW | PSP_FEES | REFUNDS | TAX_PAYABLE ...
-  debit     Int      @default(0)
-  credit    Int      @default(0)
-  refType   String? // ORDER | PAYMENT | REFUND | SETTLEMENT
-  refId     String?
-  createdAt DateTime @default(now())
+  id         String   @id @default(cuid())
+  txnId      String // groups the two legs
+  account    String // SALES | TENDER_CASH | TENDER_DUITNOW | PSP_FEES | REFUNDS | TAX_PAYABLE ...
+  debit      Int      @default(0)
+  credit     Int      @default(0)
+  refType    String? // ORDER | PAYMENT | REFUND | SETTLEMENT
+  refId      String?
+  // Where the money physically moved. Cash-up scopes on shiftId: filtering a
+  // drawer by timestamp alone sweeps in every other register in every other
+  // outlet that was trading in the same window. Scalars, not relations — the
+  // ledger is append-only and deliberately outlives the rows it references.
+  shiftId    String?
+  outletId   String?
+  registerId String?
+  createdAt  DateTime @default(now())
 
   @@index([account, createdAt])
+  @@index([shiftId, account])
+  @@index([outletId, account, createdAt])
 }
 
 // ── Shifts & cash ─────────────────────────────────────────────────────────────
 
 model Shift {
-  id           String    @id @default(cuid())
-  outletId     String
-  outlet       Outlet    @relation(fields: [outletId], references: [id])
-  registerId   String
-  register     Register  @relation(fields: [registerId], references: [id])
-  openedById   String
-  openedBy     User      @relation(fields: [openedById], references: [id])
-  openingFloat Int       @default(0)
-  closingCount Int?
-  expectedCash Int?
-  overShort    Int?
-  openedAt     DateTime  @default(now())
-  closedAt     DateTime?
+  id               String    @id @default(cuid())
+  outletId         String
+  outlet           Outlet    @relation(fields: [outletId], references: [id])
+  registerId       String
+  register         Register  @relation(fields: [registerId], references: [id])
+  openedById       String
+  openedBy         User      @relation(fields: [openedById], references: [id])
+  openingFloat     Int       @default(0)
+  closingCount     Int?
+  expectedCash     Int?
+  overShort        Int?
+  openedAt         DateTime  @default(now())
+  closedAt         DateTime?
+  // Mirrors registerId while the shift is open, NULL once closed. The unique
+  // index then enforces "one open shift per register" in the database, where a
+  // check-then-insert in application code cannot: two cashiers opening the same
+  // till at once both see no open shift and both create one, after which cash
+  // attribution is a coin flip. Postgres does not collide NULLs, so any number
+  // of closed shifts coexist.
+  activeRegisterId String?   @unique
 
   cashMovements CashMovement[]
+  orders        Order[]
 }
 
 model CashMovement {
@@ -269,11 +314,11 @@ model CashMovement {
 // ── Compliance & ops ──────────────────────────────────────────────────────────
 
 model EInvoice {
-  id          String   @id @default(cuid())
-  orderId     String   @unique
-  order       Order    @relation(fields: [orderId], references: [id])
-  type        String   @default("CONSOLIDATED") // CONSOLIDATED | FULL
-  status      String   @default("QUEUED") // QUEUED | SUBMITTED | VALIDATED | REJECTED
+  id          String    @id @default(cuid())
+  orderId     String    @unique
+  order       Order     @relation(fields: [orderId], references: [id])
+  type        String    @default("CONSOLIDATED") // CONSOLIDATED | FULL
+  status      String    @default("QUEUED") // QUEUED | SUBMITTED | VALIDATED | REJECTED
   uuid        String? // MyInvois document UUID
   longId      String?
   submittedAt DateTime?
