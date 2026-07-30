@@ -17,6 +17,8 @@ export type TenderType =
 export type OrderStatus = 'OPEN' | 'HELD' | 'COMPLETED' | 'VOIDED' | 'REFUNDED' | 'PARTIAL_REFUND';
 export type PaymentStatus = 'PENDING' | 'AUTHORIZED' | 'CAPTURED' | 'FAILED' | 'REFUNDED' | 'CANCELLED';
 export type BusinessProfile = 'RETAIL' | 'FNB' | 'EVENTS' | 'SERVICES';
+export type TaxCode = 'SST8' | 'SST6' | 'ZRL' | 'EXEMPT';
+export type CashMovementType = 'CASH_IN' | 'CASH_OUT' | 'FLOAT' | 'DROP';
 
 export interface CartLineDto {
   variantId: string;
@@ -80,7 +82,19 @@ export interface SyncBatchDto {
 export interface SyncResult {
   accepted: string[]; // idempotency keys
   duplicates: string[];
-  failed: { key: string; reason: string }[];
+  failed: SyncFailure[];
+}
+
+export interface SyncFailure {
+  key: string;
+  reason: string;
+  /**
+   * True when replaying this order will fail identically forever — the server
+   * refused it on its merits (unknown item, underpaid against the catalog
+   * price) rather than being unable to answer. The terminal parks those for a
+   * human instead of retrying them every ten seconds until the battery dies.
+   */
+  permanent: boolean;
 }
 
 export const MONEY = {
@@ -111,3 +125,98 @@ export const MONEY = {
     return totalSen < 0 ? -adjustment : adjustment;
   },
 };
+
+// ─── Tax ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Statutory rates for the tax codes the catalog may carry. Shared by the
+ * terminal and the pricing authority on the server so both arrive at the same
+ * sen — a client that computed tax differently would trip the re-pricing
+ * mismatch audit on every single sale.
+ *
+ * These are compiled in rather than configured because a rate change is never
+ * just a number: it lands on a gazetted date and usually re-prices the catalog
+ * with it. Changing them is a deploy, deliberately.
+ */
+export const TAX_RATES: Readonly<Record<TaxCode, number>> = Object.freeze({
+  SST8: 0.08,
+  SST6: 0.06,
+  ZRL: 0,
+  EXEMPT: 0,
+});
+
+export const TAX = {
+  /**
+   * Rate for a code. Throws on anything unrecognised: a mis-configured product
+   * must fail loudly at the counter, because the quiet alternative — treating
+   * it as zero-rated — under-declares SST on every sale of that item and
+   * leaves no trace to find it by.
+   */
+  rate(code: string): number {
+    const rate = (TAX_RATES as Record<string, number>)[code];
+    if (rate === undefined) throw new Error(`Unknown tax code "${code}"`);
+    return rate;
+  },
+
+  /**
+   * The tax already contained in a tax-inclusive amount, in sen: the Malaysian
+   * shelf price includes SST rather than adding it at the till, so the tax is
+   * `gross * r / (1 + r)`, not `gross * r`.
+   *
+   * Rounded on the magnitude and re-signed, so a refund reverses exactly the
+   * sen the sale charged. `Math.round` alone breaks that symmetry at the .5
+   * boundary — it rounds toward positive infinity, so a 33.5 sen sale charges
+   * 34 and its own refund gives back 33, drifting TAX_PAYABLE by a sen a time.
+   */
+  inclusiveComponent(grossSen: number, code: string): number {
+    const rate = TAX.rate(code);
+    if (!rate) return 0;
+    const magnitude = Math.round((Math.abs(grossSen) * rate) / (1 + rate));
+    return grossSen < 0 ? -magnitude : magnitude;
+  },
+};
+
+// ─── Trading day ──────────────────────────────────────────────────────────────
+
+/**
+ * The outlet's calendar date for an instant, as `YYYY-MM-DD`.
+ *
+ * The trading day belongs to the outlet, not to whatever timezone the server
+ * container booted in. On a UTC host, a naive local-midnight boundary rolls
+ * the Malaysian day over at 08:00 — mid-breakfast — so orders taken before
+ * then are numbered into yesterday's sequence while carrying today's date
+ * prefix. Formatting through `en-CA` yields ISO order directly, so the value
+ * also sorts lexicographically.
+ */
+export function businessDate(at: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(at);
+}
+
+// ─── Cash drawer ──────────────────────────────────────────────────────────────
+
+/**
+ * Which way each movement type moves the drawer. Cash movements are stored
+ * already signed so that cash-up stays a plain `SUM(amount)`; without this,
+ * summing unsigned rows makes a drop to the safe *increase* expected cash.
+ */
+export const CASH_MOVEMENT_SIGN: Readonly<Record<CashMovementType, 1 | -1>> = Object.freeze({
+  CASH_IN: 1,
+  FLOAT: 1,
+  CASH_OUT: -1,
+  DROP: -1,
+});
+
+/** Signed drawer delta for a movement. Takes a magnitude; direction is the type's. */
+export function signedCashMovement(type: string, magnitudeSen: number): number {
+  const sign = (CASH_MOVEMENT_SIGN as Record<string, 1 | -1>)[type];
+  if (sign === undefined) throw new Error(`Unknown cash movement type "${type}"`);
+  if (magnitudeSen < 0) {
+    throw new Error(`Cash movement amount must be positive — direction comes from the type "${type}"`);
+  }
+  return sign * magnitudeSen;
+}
