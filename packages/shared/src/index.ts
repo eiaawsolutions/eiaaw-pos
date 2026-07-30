@@ -84,14 +84,30 @@ export interface SyncResult {
 }
 
 export const MONEY = {
-  /** Format sen -> RM string */
+  /**
+   * Format sen -> RM string. The sign leads the currency symbol so a refund
+   * line reads "-RM 4.50" rather than "RM -4.50".
+   */
   fmt(sen: number): string {
-    return 'RM ' + (sen / 100).toFixed(2);
+    return (sen < 0 ? '-' : '') + 'RM ' + (Math.abs(sen) / 100).toFixed(2);
   },
-  /** Malaysian 5-sen cash rounding adjustment for a total in sen */
+
+  /**
+   * Bank Negara Malaysia 5-sen rounding adjustment for a cash total, in sen.
+   * Applies to the cash tender only — card, DuitNow and e-wallet settle exact.
+   *
+   * Returns the adjustment to ADD, so `total + cashRounding(total)` is always
+   * a multiple of 5 and never moves by more than 2 sen.
+   *
+   * Computed on the magnitude, then re-signed. Doing the modulo directly on a
+   * negative total is wrong: JavaScript's `%` takes the sign of the dividend,
+   * so -103 % 5 is -3, which the "round down" branch then pushes to -101
+   * instead of -105 — a refund settling 4 sen short of the matching sale.
+   */
   cashRounding(totalSen: number): number {
-    const r = totalSen % 5;
-    if (r === 0) return 0;
-    return r < 3 ? -r : 5 - r;
+    const remainder = Math.abs(totalSen) % 5;
+    if (remainder === 0) return 0;
+    const adjustment = remainder < 3 ? -remainder : 5 - remainder;
+    return totalSen < 0 ? -adjustment : adjustment;
   },
 };

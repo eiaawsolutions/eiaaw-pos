@@ -8,5 +8,9 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Tests live beside the code they cover but must not be emitted into dist —
+  // the published package is consumed by the API, the worker and the browser
+  // bundle, none of which should carry test code.
+  "exclude": ["src/**/*.test.ts"]
 }

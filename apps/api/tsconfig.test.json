@@ -1,0 +1,19 @@
+{
+  // Type-checking configuration for the integration tests.
+  //
+  // Separate from tsconfig.json because the two have genuinely different module
+  // semantics: Nest needs CommonJS with decorator metadata for the build, while
+  // Vitest runs the test files as ESM through esbuild, so `import.meta.url`
+  // resolves at runtime but is a compile error under CommonJS.
+  //
+  // noEmit — this config exists only to type-check. Build output comes from
+  // tsconfig.json and must never include test files.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src", "test"]
+}
