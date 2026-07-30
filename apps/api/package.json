@@ -11,12 +11,12 @@
     "db:seed": "ts-node prisma/seed.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.24.0",
+    "@anthropic-ai/sdk": "^0.115.0",
     "@eiaaw/shared": "*",
-    "@nestjs/common": "^10.3.0",
-    "@nestjs/core": "^10.3.0",
-    "@nestjs/jwt": "^10.2.0",
-    "@nestjs/platform-express": "^10.3.0",
+    "@nestjs/common": "^11.1.28",
+    "@nestjs/core": "^11.1.28",
+    "@nestjs/jwt": "^11.0.2",
+    "@nestjs/platform-express": "^11.1.28",
     "@prisma/adapter-pg": "6.7.0",
     "@prisma/client": "6.7.0",
     "bcryptjs": "^2.4.3",
