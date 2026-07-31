@@ -4,7 +4,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '@/lib/api';
 import { enqueue, pendingCount, rejectedCount, startAutoDrain } from '@/lib/outbox';
 import { browserPrint } from '@/lib/print';
-import { MONEY, TAX, type CartLineDto, type CreateOrderDto, type TenderType } from '@eiaaw/shared';
+import {
+  MONEY,
+  TAX,
+  discountDemand,
+  policyAllows,
+  type CartLineDto,
+  type CreateOrderDto,
+  type DiscountPolicyDto,
+  type TaxCodeRate,
+  type TenderType,
+} from '@eiaaw/shared';
 
 const OUTLET_ID = 'outlet-hq';
 const REGISTER_ID = 'reg-1';
@@ -37,6 +47,13 @@ export default function PosPage() {
   const [parked, setParked] = useState(0);
   const [payOpen, setPayOpen] = useState(false);
   const [toast, setToast] = useState('');
+  // Rates and the seller's discount ceiling both come from the back office now.
+  // Neither decides anything — the server re-prices and re-checks — but the
+  // cart has to show the customer the same numbers the till will charge.
+  const [rates, setRates] = useState<Record<string, number>>({});
+  const [policy, setPolicy] = useState<DiscountPolicyDto | null>(null);
+  const [approval, setApproval] = useState<{ resolve: (pin: string | null) => void } | null>(null);
+  const [discounting, setDiscounting] = useState<number | null>(null);
   const scanBuffer = useRef('');
   const scanTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -44,6 +61,12 @@ export default function PosPage() {
     api<Product[]>('/catalog/products')
       .then(setProducts)
       .catch(() => setToast('Working offline — cached catalog'));
+    api<TaxCodeRate[]>('/catalog/tax-codes')
+      .then((codes) => setRates(Object.fromEntries(codes.map((c) => [c.code, c.rateBps]))))
+      .catch(() => undefined);
+    api<DiscountPolicyDto>('/orders/discount-policy')
+      .then(setPolicy)
+      .catch(() => undefined);
     setOnline(navigator.onLine);
     const on = () => setOnline(true);
     const off = () => setOnline(false);
@@ -67,11 +90,7 @@ export default function PosPage() {
       const idx = prev.findIndex((l) => l.variantId === v.id);
       if (idx >= 0) {
         const next = [...prev];
-        next[idx] = {
-          ...next[idx],
-          qty: next[idx].qty + 1,
-          taxAmount: taxFor(next[idx].unitPrice, next[idx].qty + 1, next[idx].taxCode),
-        };
+        next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
         return next;
       }
       return [
@@ -84,7 +103,9 @@ export default function PosPage() {
           unitPrice: v.price,
           discount: 0,
           taxCode: p.taxCode,
-          taxAmount: taxFor(v.price, 1, p.taxCode),
+          // Filled in at send time from the rate in force, so it cannot go
+          // stale behind a cart edit.
+          taxAmount: 0,
         },
       ];
     });
@@ -122,13 +143,30 @@ export default function PosPage() {
     setToast(`Unknown barcode: ${code}`);
   }
 
+  /**
+   * Cart totals, with tax derived from the rate in force rather than carried on
+   * the line. Deriving it here means a rate that loads a moment after the first
+   * scan still shows correctly, and cart edits cannot leave a stale tax figure
+   * behind on a line nobody touched.
+   */
   const totals = useMemo(() => {
     const subtotal = cart.reduce((s, l) => s + l.unitPrice * l.qty, 0);
     const discount = cart.reduce((s, l) => s + l.discount, 0);
-    const tax = cart.reduce((s, l) => s + l.taxAmount, 0);
+    const tax = cart.reduce((s, l) => s + taxFor(l, rates), 0);
     const beforeRounding = subtotal - discount;
     return { subtotal, discount, tax, beforeRounding };
-  }, [cart]);
+  }, [cart, rates]);
+
+  /** How much authority this cart is asking for, on the same arithmetic the server uses. */
+  const demand = useMemo(
+    () =>
+      discountDemand(
+        cart.map((l) => ({ gross: l.unitPrice * l.qty, discount: l.discount })),
+        0,
+      ),
+    [cart],
+  );
+  const needsApproval = !policyAllows(policy, demand);
 
   const filtered = products.filter(
     (p) =>
@@ -137,18 +175,43 @@ export default function PosPage() {
       p.variants.some((v) => v.sku.includes(search)),
   );
 
+  /** Collect an approver's PIN, resolving to null if the cashier backs out. */
+  function askForApproval(): Promise<string | null> {
+    return new Promise((resolve) => {
+      setApproval({ resolve });
+    });
+  }
+
   async function completeSale(tender: TenderType, tendered: number, reference?: string) {
     const rounding = tender === 'CASH' ? MONEY.cashRounding(totals.beforeRounding) : 0;
     const total = totals.beforeRounding + rounding;
+
+    // Ask before taking payment, not after: finding out the discount was never
+    // allowed once the card has been charged is the worse order to do this in.
+    // The server checks again regardless — this only saves the customer from
+    // watching it fail.
+    let approvalPin: string | undefined;
+    if (needsApproval) {
+      const pin = await askForApproval();
+      if (pin === null) {
+        setToast('Discount needs a manager approval');
+        return;
+      }
+      approvalPin = pin;
+    }
+
     const order: CreateOrderDto = {
       idempotencyKey: crypto.randomUUID(),
       registerId: REGISTER_ID,
       outletId: OUTLET_ID,
-      lines: cart,
+      // Tax stamped at the rate in force as the sale is sent, so the printed
+      // preview and the request agree even if the cart sat open for a while.
+      lines: cart.map((l) => ({ ...l, taxAmount: taxFor(l, rates) })),
       cartDiscount: 0,
       roundingAdjustment: rounding,
       payments: [{ tender, amount: tender === 'CASH' ? tendered : total, reference }],
       placedAt: new Date().toISOString(),
+      discountApprovalPin: approvalPin,
     };
     // What the cart believed, used only until the server answers. The server
     // re-prices from the catalog, so its figures are the sale — and the receipt
@@ -271,13 +334,9 @@ export default function PosPage() {
                     onClick={() =>
                       setCart((c) =>
                         c.map((x, j) =>
-                          j === i
-                            ? {
-                                ...x,
-                                qty: Math.max(1, x.qty - 1),
-                                taxAmount: taxFor(x.unitPrice, Math.max(1, x.qty - 1), x.taxCode),
-                              }
-                            : x,
+                          // A discount set against the old quantity would
+                          // silently become a larger share of a smaller line.
+                          j === i ? { ...x, qty: Math.max(1, x.qty - 1), discount: 0 } : x,
                         ),
                       )
                     }
@@ -289,16 +348,18 @@ export default function PosPage() {
                     className="btn-ghost"
                     style={{ padding: '2px 10px' }}
                     onClick={() =>
-                      setCart((c) =>
-                        c.map((x, j) =>
-                          j === i
-                            ? { ...x, qty: x.qty + 1, taxAmount: taxFor(x.unitPrice, x.qty + 1, x.taxCode) }
-                            : x,
-                        ),
-                      )
+                      setCart((c) => c.map((x, j) => (j === i ? { ...x, qty: x.qty + 1, discount: 0 } : x)))
                     }
                   >
                     +
+                  </button>
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: '2px 10px', marginLeft: 8 }}
+                    title="Discount this line"
+                    onClick={() => setDiscounting(i)}
+                  >
+                    %
                   </button>
                   <button
                     className="btn-red"
@@ -308,6 +369,9 @@ export default function PosPage() {
                     ×
                   </button>
                 </div>
+                {l.discount > 0 && (
+                  <div style={{ color: 'var(--accent)', fontSize: 12 }}>less {MONEY.fmt(l.discount)}</div>
+                )}
               </div>
               <strong>{MONEY.fmt(l.unitPrice * l.qty - l.discount)}</strong>
             </div>
@@ -315,6 +379,12 @@ export default function PosPage() {
         </div>
         <div style={{ padding: 16, borderTop: '1px solid var(--panel2)' }}>
           <Row label="Subtotal" value={MONEY.fmt(totals.subtotal)} />
+          {totals.discount > 0 && (
+            <Row
+              label={`Discount${needsApproval ? ' (needs approval)' : ''}`}
+              value={`-${MONEY.fmt(totals.discount)}`}
+            />
+          )}
           <Row label="SST (incl.)" value={MONEY.fmt(totals.tax)} muted />
           <Row label="TOTAL" value={MONEY.fmt(totals.beforeRounding)} big />
           <button
@@ -331,25 +401,47 @@ export default function PosPage() {
       {payOpen && (
         <PayModal total={totals.beforeRounding} onDone={completeSale} onClose={() => setPayOpen(false)} />
       )}
+      {discounting !== null && cart[discounting] && (
+        <DiscountModal
+          line={cart[discounting]}
+          onDone={(sen) => {
+            if (sen !== null) {
+              setCart((c) => c.map((x, j) => (j === discounting ? { ...x, discount: sen } : x)));
+            }
+            setDiscounting(null);
+          }}
+        />
+      )}
+      {approval && (
+        <ApprovalModal
+          amount={demand.totalSen}
+          percentBps={demand.percentBps}
+          onDone={(pin) => {
+            approval.resolve(pin);
+            setApproval(null);
+          }}
+        />
+      )}
       {toast && <Toast msg={toast} onDone={() => setToast('')} />}
     </main>
   );
 }
 
 /**
- * Cart-side preview of the SST inside a line, using the item's own tax code
- * rather than one flat rate — a zero-rated item priced as if it were SST8 shows
- * the customer tax it is not being charged, and disagrees with the server's
- * figure on every sale.
+ * Cart-side preview of the SST inside a line, at the rate in force for that
+ * item's own tax code — a zero-rated item shown at 8% displays tax the customer
+ * is not being charged, and disagrees with the server on every sale.
  *
  * Only ever a preview: the server re-prices from the catalog and its number is
- * the one recorded. So an unrecognised code shows nothing here rather than
- * taking the terminal down — the sale is refused server-side, with a message
- * naming the item to fix.
+ * the one recorded. A code whose rate has not loaded yet shows nothing rather
+ * than taking the terminal down; if it is genuinely unrated the sale is refused
+ * server-side, naming the item to fix.
  */
-function taxFor(unitPrice: number, qty: number, taxCode: string) {
+function taxFor(l: CartLineDto, rates: Record<string, number>): number {
+  const rateBps = rates[l.taxCode];
+  if (rateBps === undefined) return 0;
   try {
-    return TAX.inclusiveComponent(unitPrice * qty, taxCode);
+    return TAX.inclusiveComponent(l.unitPrice * l.qty - l.discount, rateBps);
   } catch {
     return 0;
   }
@@ -369,6 +461,133 @@ function Row({ label, value, big, muted }: { label: string; value: string; big?:
     >
       <span>{label}</span>
       <span>{value}</span>
+    </div>
+  );
+}
+
+/**
+ * Take a discount off one line, entered in ringgit.
+ *
+ * Bounded by the line here so the cashier finds out before the customer does;
+ * the same bound is re-applied server-side, where it is the one that counts.
+ */
+function DiscountModal({ line, onDone }: { line: CartLineDto; onDone: (sen: number | null) => void }) {
+  const gross = line.unitPrice * line.qty;
+  const [entered, setEntered] = useState(line.discount ? (line.discount / 100).toFixed(2) : '');
+  const sen = Math.round(Number(entered) * 100);
+  const valid = entered !== '' && Number.isFinite(sen) && sen >= 0 && sen <= gross;
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.6)',
+        display: 'grid',
+        placeItems: 'center',
+      }}
+      onClick={() => onDone(null)}
+    >
+      <div className="card" style={{ width: 380 }} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ marginBottom: 4 }}>Discount</h2>
+        <p className="muted" style={{ marginBottom: 14 }}>
+          {line.name} — {MONEY.fmt(gross)}
+        </p>
+        <input
+          autoFocus
+          type="number"
+          step="0.05"
+          min="0"
+          placeholder="RM off"
+          value={entered}
+          onChange={(e) => setEntered(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && valid) onDone(sen);
+          }}
+        />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 10 }}>
+          {[5, 10, 20].map((pct) => (
+            <button
+              key={pct}
+              className="btn-ghost"
+              onClick={() => setEntered(((gross * pct) / 100 / 100).toFixed(2))}
+            >
+              {pct}%
+            </button>
+          ))}
+        </div>
+        {entered !== '' && !valid && (
+          <p className="muted" style={{ marginTop: 10 }}>
+            Must be between nothing and {MONEY.fmt(gross)}.
+          </p>
+        )}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+          <button className="btn-ghost" onClick={() => onDone(line.discount ? 0 : null)}>
+            {line.discount ? 'Remove' : 'Cancel'}
+          </button>
+          <button className="btn-green" disabled={!valid} onClick={() => onDone(sen)}>
+            Apply
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Manager approval for an over-limit discount.
+ *
+ * Deliberately says nothing about who can approve or whether a PIN exists — a
+ * dialog that distinguishes "wrong PIN" from "not senior enough" is an oracle
+ * for finding real ones, and this sits on a counter anyone can reach.
+ */
+function ApprovalModal({
+  amount,
+  percentBps,
+  onDone,
+}: {
+  amount: number;
+  percentBps: number;
+  onDone: (pin: string | null) => void;
+}) {
+  const [pin, setPin] = useState('');
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.6)',
+        display: 'grid',
+        placeItems: 'center',
+      }}
+      onClick={() => onDone(null)}
+    >
+      <div className="card" style={{ width: 380 }} onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ marginBottom: 4 }}>Approval needed</h2>
+        <p className="muted" style={{ marginBottom: 14 }}>
+          {MONEY.fmt(amount)} off ({(percentBps / 100).toFixed(1)}%) is above this till&rsquo;s limit. A
+          manager can authorise it.
+        </p>
+        <input
+          autoFocus
+          type="password"
+          inputMode="numeric"
+          placeholder="Manager PIN"
+          value={pin}
+          onChange={(e) => setPin(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && pin) onDone(pin);
+          }}
+        />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+          <button className="btn-ghost" onClick={() => onDone(null)}>
+            Cancel
+          </button>
+          <button className="btn-green" disabled={!pin} onClick={() => onDone(pin)}>
+            Approve
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
