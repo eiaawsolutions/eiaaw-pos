@@ -6,7 +6,48 @@ const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
 });
 
+/**
+ * Tax codes with a rate already in force, and the discount ceilings each role
+ * starts with. Both are configurable data — these are defaults a merchant is
+ * expected to revisit, not constants.
+ */
+async function seedPolicy() {
+  const codes: [string, string, number][] = [
+    ['SST8', 'Service Tax 8%', 800],
+    ['SST6', 'Service Tax 6%', 600],
+    ['ZRL', 'Zero-rated', 0],
+    ['EXEMPT', 'Exempt', 0],
+  ];
+  // Dated far enough back that every existing order falls after it, so nothing
+  // already sold is left without a rate.
+  const inForceSince = new Date('2000-01-01T00:00:00Z');
+  for (const [code, name, rateBps] of codes) {
+    await prisma.taxCode.upsert({ where: { code }, update: { name }, create: { code, name } });
+    const existing = await prisma.taxRate.findFirst({ where: { code, effectiveFrom: inForceSince } });
+    if (!existing) await prisma.taxRate.create({ data: { code, rateBps, effectiveFrom: inForceSince } });
+  }
+
+  // A cashier can round off a few ringgit to settle a complaint; anything that
+  // starts to look like a decision goes to whoever is on duty. Owners are
+  // uncapped because someone has to be.
+  const policies: [string, number, number | null][] = [
+    ['OWNER', 10_000, null],
+    ['MANAGER', 5000, 50_000],
+    ['CASHIER', 1000, 5000],
+    ['KITCHEN', 0, 0],
+  ];
+  for (const [role, maxPercentBps, maxAmountSen] of policies) {
+    await prisma.discountPolicy.upsert({
+      where: { role },
+      update: {},
+      create: { role, maxPercentBps, maxAmountSen },
+    });
+  }
+}
+
 async function main() {
+  await seedPolicy();
+
   const outlet = await prisma.outlet.upsert({
     where: { id: 'outlet-hq' },
     update: {},
@@ -89,6 +130,8 @@ async function main() {
   }
 
   console.log('Seed complete. Login: admin@eiaawsolutions.com / ChangeMe123! (PIN 123456)');
+  console.log('Discount authority: cashier 10%/RM50, manager 50%/RM500, owner unlimited.');
+  console.log('Owner PIN 123456 approves an over-limit discount at the terminal.');
 }
 
 main().finally(() => prisma.$disconnect());

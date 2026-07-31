@@ -8,6 +8,8 @@ import { AuthController } from './auth/auth.controller';
 import { AuthService } from './auth/auth.service';
 import { CatalogController } from './catalog/catalog.controller';
 import { CatalogService } from './catalog/catalog.service';
+import { TaxService } from './catalog/tax.service';
+import { DiscountAuthorityService } from './orders/discount-authority.service';
 import { InventoryController } from './inventory/inventory.controller';
 import { InventoryService } from './inventory/inventory.service';
 import { OrdersController } from './orders/orders.controller';
@@ -52,6 +54,8 @@ import { OnboardingService } from './ai/onboarding.service';
     PrismaService,
     AuthService,
     CatalogService,
+    TaxService,
+    DiscountAuthorityService,
     InventoryService,
     OrdersService,
     PaymentsService,

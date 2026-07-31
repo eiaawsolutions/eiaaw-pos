@@ -8,8 +8,10 @@ import {
   makeRegister,
   makeUser,
   orderDto,
+  ordersService,
+  seedPolicyDefaults,
 } from './fixtures';
-import { OrdersService } from '../src/orders/orders.service';
+import type { OrdersService } from '../src/orders/orders.service';
 import { ShiftsService } from '../src/shifts/shifts.service';
 
 /**
@@ -23,9 +25,10 @@ describe('shifts — blind cash-up', () => {
   let shifts: ShiftsService;
   let orders: OrdersService;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await seedPolicyDefaults();
     shifts = new ShiftsService(prisma as never);
-    orders = new OrdersService(prisma as never);
+    orders = ordersService();
   });
 
   async function till(opts: { outletId?: string; float?: number } = {}) {

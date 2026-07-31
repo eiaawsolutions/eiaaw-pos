@@ -1,7 +1,9 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateOrderDto, MONEY, TAX, businessDate } from '@eiaaw/shared';
+import { TaxService } from '../catalog/tax.service';
+import { DiscountAuthorityService } from './discount-authority.service';
+import { CreateOrderDto, MONEY, TAX, businessDate, discountDemand } from '@eiaaw/shared';
 import { randomUUID } from 'crypto';
 
 const TENDER_ACCOUNT: Record<string, string> = {
@@ -41,7 +43,11 @@ type PricedLine = {
 
 @Injectable()
 export class OrdersService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private tax: TaxService,
+    private discounts: DiscountAuthorityService,
+  ) {}
 
   /**
    * Create a completed order. Idempotent on dto.idempotencyKey — safe for
@@ -67,7 +73,20 @@ export class OrdersService {
     if (!outlet) throw new BadRequestException(`Unknown outlet ${dto.outletId}`);
 
     const payments = this.validatePayments(dto);
-    const { lines, subtotal, discountTotal, taxTotal } = await this.priceLines(dto);
+    // One instant for the whole sale, so a rate that changes between two lines
+    // of the same basket cannot apply to only some of them.
+    const at = new Date();
+    const { lines, subtotal, discountTotal, taxTotal, demand } = await this.priceLines(dto, at);
+
+    // Bounded and audited was never the same as allowed: until this check, any
+    // holder of a valid token could take money off a sale up to the value of
+    // the line, and the audit log would faithfully record that they had.
+    const { approvedById } = await this.discounts.authorise({
+      demand,
+      sellerId: dto.staffId || null,
+      registerId: dto.registerId || null,
+      pin: dto.discountApprovalPin,
+    });
 
     const netTotal = subtotal - discountTotal;
     // BNM 5-sen rounding is a property of settling in coins. An order paid by
@@ -112,6 +131,7 @@ export class OrdersService {
           outletId: dto.outletId,
           registerId: dto.registerId || null,
           staffId: dto.staffId || null,
+          discountApprovedById: approvedById,
           customerId: dto.customerId || null,
           shiftId: shift?.id ?? null,
           eventId: dto.eventId || null,
@@ -222,11 +242,31 @@ export class OrdersService {
         data: { orderId: created.id, type: 'CONSOLIDATED', status: 'QUEUED' },
       });
 
-      const trail: { action: string; detail: Prisma.InputJsonObject }[] = [];
+      const trail: { action: string; detail: Prisma.InputJsonObject; userId?: string | null }[] = [];
       if (discountTotal > 0) {
         trail.push({
           action: 'DISCOUNT',
-          detail: { discountTotal, cartDiscount: dto.cartDiscount ?? 0, subtotal, total },
+          detail: {
+            discountTotal,
+            cartDiscount: dto.cartDiscount ?? 0,
+            subtotal,
+            total,
+            percentBps: demand.percentBps,
+          },
+        });
+      }
+      if (approvedById) {
+        // Attributed to the approver, not the seller: the question this answers
+        // later is who allowed it, and the seller is already on the order.
+        trail.push({
+          action: 'DISCOUNT_OVERRIDE',
+          userId: approvedById,
+          detail: {
+            requestedById: dto.staffId ?? null,
+            discountTotal,
+            percentBps: demand.percentBps,
+            subtotal,
+          },
         });
       }
       if (claimedTotal !== null && claimedTotal !== total) {
@@ -248,7 +288,7 @@ export class OrdersService {
       if (trail.length) {
         await tx.auditLog.createMany({
           data: trail.map((t) => ({
-            userId: dto.staffId || null,
+            userId: t.userId !== undefined ? t.userId : dto.staffId || null,
             action: t.action,
             entity: 'Order',
             entityId: created.id,
@@ -367,7 +407,7 @@ export class OrdersService {
    * `subtotal - discountTotal` and the tax on each line matches the money that
    * line actually took.
    */
-  private async priceLines(dto: CreateOrderDto) {
+  private async priceLines(dto: CreateOrderDto, at: Date) {
     const ids = [...new Set(dto.lines.map((l) => l.variantId))];
     const variants = await this.prisma.variant.findMany({
       where: { id: { in: ids } },
@@ -421,6 +461,13 @@ export class OrdersService {
       priced.map((p) => p.net),
     );
 
+    // One lookup for the whole basket, at the moment of sale — a rate change
+    // mid-shift must not land halfway through a cart.
+    const rates = await this.tax.ratesFor(
+      priced.map((p) => p.variant.product.taxCode),
+      at,
+    );
+
     const lines: PricedLine[] = priced.map((p, i) => {
       const discount = p.lineDiscount + shares[i];
       const total = p.gross - discount;
@@ -433,7 +480,7 @@ export class OrdersService {
         unitPrice: p.variant.price,
         discount,
         taxCode,
-        taxAmount: this.taxOn(total, taxCode, p.variant.name),
+        taxAmount: TAX.inclusiveComponent(total, rates.get(taxCode)!),
         total,
         notes: p.notes,
       };
@@ -444,22 +491,13 @@ export class OrdersService {
       subtotal,
       discountTotal: lineDiscounts + cartDiscount,
       taxTotal: lines.reduce((s, l) => s + l.taxAmount, 0),
+      // Kept unapportioned for the authority check: whether a discount needs
+      // signing off is about what was asked for, not how it was spread.
+      demand: discountDemand(
+        priced.map((p) => ({ gross: p.gross, discount: p.lineDiscount })),
+        cartDiscount,
+      ),
     };
-  }
-
-  /**
-   * Tax on an amount, refusing a code the catalog should never have carried.
-   * The quiet alternative — treating the unknown as zero-rated — under-declares
-   * SST on every sale of that item and leaves nothing behind to find it by.
-   */
-  private taxOn(amount: number, taxCode: string, itemName: string): number {
-    try {
-      return TAX.inclusiveComponent(amount, taxCode);
-    } catch {
-      throw new BadRequestException(
-        `${itemName} carries an unrecognised tax code "${taxCode}" — fix it in the back office before selling it`,
-      );
-    }
   }
 
   /**

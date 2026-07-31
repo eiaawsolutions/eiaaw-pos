@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { prisma } from './setup';
-import { line, makeOutlet, makeProduct, makeRegister, makeUser, orderDto } from './fixtures';
-import { OrdersService } from '../src/orders/orders.service';
+import {
+  line,
+  makeOutlet,
+  makeProduct,
+  makeRegister,
+  makeUser,
+  orderDto,
+  ordersService,
+  seedPolicyDefaults,
+} from './fixtures';
+import type { OrdersService } from '../src/orders/orders.service';
 import { businessDate } from '@eiaaw/shared';
 
 /**
@@ -12,8 +21,9 @@ import { businessDate } from '@eiaaw/shared';
 describe('orders — receipt numbering', () => {
   let orders: OrdersService;
 
-  beforeEach(() => {
-    orders = new OrdersService(prisma as never);
+  beforeEach(async () => {
+    await seedPolicyDefaults();
+    orders = ordersService();
   });
 
   async function outletWithStock(timezone?: string) {
