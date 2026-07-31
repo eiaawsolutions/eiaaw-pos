@@ -1,49 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { TAX, TAX_RATES, businessDate, signedCashMovement } from './index';
-
-describe('TAX.rate', () => {
-  it('knows the codes the catalog is allowed to use', () => {
-    expect(TAX.rate('SST8')).toBe(0.08);
-    expect(TAX.rate('SST6')).toBe(0.06);
-    expect(TAX.rate('ZRL')).toBe(0);
-    expect(TAX.rate('EXEMPT')).toBe(0);
-  });
-
-  it('refuses an unknown code rather than silently charging zero tax', () => {
-    // Defaulting to 0 would under-declare SST on every sale of a
-    // mis-configured product, and nothing downstream would notice. Failing
-    // the sale is loud, and the fix is a back-office edit.
-    expect(() => TAX.rate('SST10')).toThrow(/unknown tax code/i);
-    expect(() => TAX.rate('')).toThrow(/unknown tax code/i);
-  });
-
-  it('exposes the rate table for back-office display', () => {
-    expect(Object.keys(TAX_RATES).sort()).toEqual(['EXEMPT', 'SST6', 'SST8', 'ZRL']);
-  });
-});
+import { TAX, businessDate, discountDemand, policyAllows, signedCashMovement } from './index';
 
 describe('TAX.inclusiveComponent', () => {
   // Malaysian shelf prices are tax-inclusive: the tax is the portion *inside*
-  // the price, not something added on top. gross * r / (1 + r).
+  // the price, not something added on top. gross * r / (1 + r), which in basis
+  // points is gross * bps / (10000 + bps) — integer throughout, so nothing
+  // depends on a float landing where it ought.
   it('extracts the tax already inside a tax-inclusive price', () => {
-    expect(TAX.inclusiveComponent(1080, 'SST8')).toBe(80); // 1000 net + 80 tax
-    expect(TAX.inclusiveComponent(1060, 'SST6')).toBe(60);
+    expect(TAX.inclusiveComponent(1080, 800)).toBe(80); // 1000 net + 80 tax
+    expect(TAX.inclusiveComponent(1060, 600)).toBe(60);
   });
 
-  it('is zero for zero-rated and exempt goods', () => {
-    expect(TAX.inclusiveComponent(4900, 'ZRL')).toBe(0);
-    expect(TAX.inclusiveComponent(4900, 'EXEMPT')).toBe(0);
+  it('is zero at a zero rate', () => {
+    expect(TAX.inclusiveComponent(4900, 0)).toBe(0);
   });
 
   it('rounds to whole sen — money has no fractions', () => {
-    // 450 * 0.08 / 1.08 = 33.33…
-    expect(TAX.inclusiveComponent(450, 'SST8')).toBe(33);
-    expect(Number.isInteger(TAX.inclusiveComponent(451, 'SST8'))).toBe(true);
+    // 450 * 800 / 10800 = 33.33…
+    expect(TAX.inclusiveComponent(450, 800)).toBe(33);
+    expect(Number.isInteger(TAX.inclusiveComponent(451, 800))).toBe(true);
   });
 
   it('never exceeds the gross it was extracted from', () => {
     for (const gross of [1, 3, 7, 99, 12345]) {
-      const tax = TAX.inclusiveComponent(gross, 'SST8');
+      const tax = TAX.inclusiveComponent(gross, 800);
       expect(tax).toBeGreaterThanOrEqual(0);
       expect(tax).toBeLessThanOrEqual(gross);
     }
@@ -52,8 +32,24 @@ describe('TAX.inclusiveComponent', () => {
   it('handles a refund (negative gross) with a matching negative tax', () => {
     // Otherwise a refund reverses less tax than the sale charged and
     // TAX_PAYABLE drifts by a sen on every return.
-    expect(TAX.inclusiveComponent(-1080, 'SST8')).toBe(-80);
-    expect(TAX.inclusiveComponent(-450, 'SST8')).toBe(-33);
+    expect(TAX.inclusiveComponent(-1080, 800)).toBe(-80);
+    expect(TAX.inclusiveComponent(-450, 800)).toBe(-33);
+  });
+
+  it('refuses a rate that is not a sane basis-point integer', () => {
+    // A misconfigured rate must not silently become "no tax" or a fraction of
+    // a sen that compounds across a day's takings.
+    expect(() => TAX.inclusiveComponent(1000, 8)).not.toThrow(); // 0.08% is odd but legal
+    expect(() => TAX.inclusiveComponent(1000, -100)).toThrow(/rate/i);
+    expect(() => TAX.inclusiveComponent(1000, 8.5)).toThrow(/rate/i);
+    expect(() => TAX.inclusiveComponent(1000, 100_001)).toThrow(/rate/i);
+  });
+
+  it('survives a rate change without restating the old one', () => {
+    // The 6% -> 8% service tax move: the same gross carries different tax
+    // depending on which rate was in force, and both must be expressible.
+    expect(TAX.inclusiveComponent(10_600, 600)).toBe(600);
+    expect(TAX.inclusiveComponent(10_800, 800)).toBe(800);
   });
 });
 
@@ -105,5 +101,92 @@ describe('signedCashMovement', () => {
 
   it('rejects an unknown movement type', () => {
     expect(() => signedCashMovement('SKIM', 100)).toThrow(/unknown cash movement type/i);
+  });
+});
+
+describe('discountDemand', () => {
+  // How much authority a sale is asking for. Shared so the terminal knows when
+  // to raise the approval prompt and the server decides on the same arithmetic
+  // — two implementations of this rule would disagree, and the one that
+  // mattered would be the lenient one.
+  it('is nothing when nothing is discounted', () => {
+    expect(discountDemand([{ gross: 1000, discount: 0 }], 0)).toEqual({ percentBps: 0, totalSen: 0 });
+  });
+
+  it('measures a line discount against that line', () => {
+    expect(discountDemand([{ gross: 1000, discount: 100 }], 0)).toEqual({
+      percentBps: 1000, // 10%
+      totalSen: 100,
+    });
+  });
+
+  it('takes the steepest line, not the average', () => {
+    // Half off one item is a 50% decision, however large the rest of the cart.
+    const demand = discountDemand(
+      [
+        { gross: 1000, discount: 500 },
+        { gross: 9000, discount: 0 },
+      ],
+      0,
+    );
+    expect(demand.percentBps).toBe(5000);
+    expect(demand.totalSen).toBe(500);
+  });
+
+  it('measures a cart discount against the whole cart', () => {
+    expect(discountDemand([{ gross: 1000, discount: 0 }], 100)).toEqual({
+      percentBps: 1000,
+      totalSen: 100,
+    });
+  });
+
+  it('counts line and cart discounts together against the cart', () => {
+    // 50% off one line then 10% off everything is not a 10% decision.
+    const demand = discountDemand([{ gross: 1000, discount: 500 }], 100);
+    expect(demand.totalSen).toBe(600);
+    expect(demand.percentBps).toBe(6000); // 600 of 1000
+  });
+
+  it('treats any discount on a zero-priced line as total', () => {
+    expect(discountDemand([{ gross: 0, discount: 50 }], 0).percentBps).toBe(10_000);
+  });
+
+  it('does not divide by zero on an empty or free cart', () => {
+    expect(discountDemand([], 0)).toEqual({ percentBps: 0, totalSen: 0 });
+    expect(discountDemand([{ gross: 0, discount: 0 }], 0)).toEqual({ percentBps: 0, totalSen: 0 });
+  });
+});
+
+describe('policyAllows', () => {
+  const cashier = { role: 'CASHIER', maxPercentBps: 1000, maxAmountSen: 5000 };
+  const owner = { role: 'OWNER', maxPercentBps: 10_000, maxAmountSen: null };
+
+  it('permits a discount inside both ceilings', () => {
+    expect(policyAllows(cashier, { percentBps: 1000, totalSen: 5000 })).toBe(true);
+  });
+
+  it('refuses one that is too steep even when the amount is small', () => {
+    expect(policyAllows(cashier, { percentBps: 5000, totalSen: 100 })).toBe(false);
+  });
+
+  it('refuses one that is too large even when the percentage is modest', () => {
+    // 5% of a RM2,000 basket is still RM100 out of the till.
+    expect(policyAllows(cashier, { percentBps: 500, totalSen: 10_000 })).toBe(false);
+  });
+
+  it('treats a null amount ceiling as no ceiling', () => {
+    expect(policyAllows(owner, { percentBps: 10_000, totalSen: 9_999_999 })).toBe(true);
+  });
+
+  it('always permits no discount at all, even for a role with no authority', () => {
+    const kitchen = { role: 'KITCHEN', maxPercentBps: 0, maxAmountSen: 0 };
+    expect(policyAllows(kitchen, { percentBps: 0, totalSen: 0 })).toBe(true);
+    expect(policyAllows(kitchen, { percentBps: 1, totalSen: 1 })).toBe(false);
+  });
+
+  it('refuses when there is no policy for the role at all', () => {
+    // An unrecognised role must not inherit someone else's authority.
+    expect(policyAllows(undefined, { percentBps: 1, totalSen: 1 })).toBe(false);
+    expect(policyAllows(undefined, { percentBps: 0, totalSen: 0 })).toBe(true);
   });
 });

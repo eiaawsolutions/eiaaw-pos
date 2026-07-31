@@ -45,6 +45,12 @@ export interface CreateOrderDto {
   placedAt: string; // ISO — when created on device (may predate sync)
   eventId?: string;
   offline?: boolean;
+  /**
+   * PIN of someone authorising a discount beyond the seller's own limit. Read
+   * only when the sale actually demands more authority than the seller has, and
+   * never stored — the order keeps the approver's id, not their credential.
+   */
+  discountApprovalPin?: string;
 }
 
 export interface CreatePaymentDto {
@@ -128,53 +134,101 @@ export const MONEY = {
 
 // ─── Tax ──────────────────────────────────────────────────────────────────────
 
-/**
- * Statutory rates for the tax codes the catalog may carry. Shared by the
- * terminal and the pricing authority on the server so both arrive at the same
- * sen — a client that computed tax differently would trip the re-pricing
- * mismatch audit on every single sale.
- *
- * These are compiled in rather than configured because a rate change is never
- * just a number: it lands on a gazetted date and usually re-prices the catalog
- * with it. Changing them is a deploy, deliberately.
- */
-export const TAX_RATES: Readonly<Record<TaxCode, number>> = Object.freeze({
-  SST8: 0.08,
-  SST6: 0.06,
-  ZRL: 0,
-  EXEMPT: 0,
-});
+/** Ceiling on a sane rate: 1000%. Anything past it is a data-entry accident. */
+const MAX_RATE_BPS = 100_000;
 
 export const TAX = {
   /**
-   * Rate for a code. Throws on anything unrecognised: a mis-configured product
-   * must fail loudly at the counter, because the quiet alternative — treating
-   * it as zero-rated — under-declares SST on every sale of that item and
-   * leaves no trace to find it by.
-   */
-  rate(code: string): number {
-    const rate = (TAX_RATES as Record<string, number>)[code];
-    if (rate === undefined) throw new Error(`Unknown tax code "${code}"`);
-    return rate;
-  },
-
-  /**
    * The tax already contained in a tax-inclusive amount, in sen: the Malaysian
    * shelf price includes SST rather than adding it at the till, so the tax is
-   * `gross * r / (1 + r)`, not `gross * r`.
+   * `gross * r / (1 + r)`, not `gross * r`. In basis points that is
+   * `gross * bps / (10000 + bps)`, which keeps the whole calculation in
+   * integers rather than trusting a float to land on a sen boundary.
+   *
+   * Rates arrive from the catalog rather than a table compiled in here: they
+   * change on gazetted dates, and the rate that applied to a sale is a property
+   * of when it happened, not of which build was deployed.
    *
    * Rounded on the magnitude and re-signed, so a refund reverses exactly the
    * sen the sale charged. `Math.round` alone breaks that symmetry at the .5
    * boundary — it rounds toward positive infinity, so a 33.5 sen sale charges
    * 34 and its own refund gives back 33, drifting TAX_PAYABLE by a sen a time.
    */
-  inclusiveComponent(grossSen: number, code: string): number {
-    const rate = TAX.rate(code);
-    if (!rate) return 0;
-    const magnitude = Math.round((Math.abs(grossSen) * rate) / (1 + rate));
+  inclusiveComponent(grossSen: number, rateBps: number): number {
+    if (!Number.isInteger(rateBps) || rateBps < 0 || rateBps > MAX_RATE_BPS) {
+      throw new Error(`Invalid tax rate ${rateBps} bps`);
+    }
+    if (rateBps === 0) return 0;
+    const magnitude = Math.round((Math.abs(grossSen) * rateBps) / (10_000 + rateBps));
     return grossSen < 0 ? -magnitude : magnitude;
   },
 };
+
+export interface TaxCodeRate {
+  code: string;
+  name: string;
+  rateBps: number;
+}
+
+// ─── Discount authority ───────────────────────────────────────────────────────
+
+export interface DiscountPolicyDto {
+  role: string;
+  maxPercentBps: number;
+  /** Null means no absolute ceiling. */
+  maxAmountSen: number | null;
+}
+
+/** How much authority a sale is asking for. */
+export interface DiscountDemand {
+  /** The steepest discount anywhere in the sale, in basis points. */
+  percentBps: number;
+  /** Total taken off the sale, in sen. */
+  totalSen: number;
+}
+
+/**
+ * What a sale's discounts demand, measured two ways at once: the steepest
+ * single line against its own price, and everything taken off against the cart.
+ * The higher of the two governs, because both are ways to give money away and
+ * neither should be reachable by hiding inside the other — half off one item in
+ * a large basket is a half-off decision, however small it looks as a fraction
+ * of the total.
+ *
+ * Lives here rather than on the server alone so the terminal can tell, before
+ * it asks anyone for a PIN, whether this sale will need one. Two
+ * implementations of this rule would drift, and the one that mattered would be
+ * whichever was more permissive.
+ */
+export function discountDemand(
+  lines: { gross: number; discount: number }[],
+  cartDiscount: number,
+): DiscountDemand {
+  const subtotal = lines.reduce((s, l) => s + l.gross, 0);
+  const totalSen = lines.reduce((s, l) => s + l.discount, 0) + cartDiscount;
+
+  const pct = (part: number, whole: number) => {
+    if (part <= 0) return 0;
+    // Everything off something priced at nothing is still everything off.
+    if (whole <= 0) return 10_000;
+    return Math.round((part * 10_000) / whole);
+  };
+
+  const steepestLine = lines.reduce((worst, l) => Math.max(worst, pct(l.discount, l.gross)), 0);
+  return { percentBps: Math.max(steepestLine, pct(totalSen, subtotal)), totalSen };
+}
+
+/**
+ * Whether a role may take this discount unaided. A role with no policy at all
+ * has no authority — an unrecognised role must not quietly inherit someone
+ * else's — but nobody needs authority to discount nothing.
+ */
+export function policyAllows(policy: DiscountPolicyDto | undefined | null, demand: DiscountDemand): boolean {
+  if (demand.percentBps <= 0 && demand.totalSen <= 0) return true;
+  if (!policy) return false;
+  if (demand.percentBps > policy.maxPercentBps) return false;
+  return policy.maxAmountSen === null || demand.totalSen <= policy.maxAmountSen;
+}
 
 // ─── Trading day ──────────────────────────────────────────────────────────────
 

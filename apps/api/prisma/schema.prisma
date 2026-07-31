@@ -80,10 +80,45 @@ model User {
   active       Boolean  @default(true)
   createdAt    DateTime @default(now())
 
-  orders        Order[]
-  shifts        Shift[]
-  auditLogs     AuditLog[]
-  cashMovements CashMovement[]
+  orders            Order[]        @relation("OrderStaff")
+  approvedDiscounts Order[]        @relation("OrderDiscountApprover")
+  shifts            Shift[]
+  auditLogs         AuditLog[]
+  cashMovements     CashMovement[]
+}
+
+// ── Discount authority ────────────────────────────────────────────────────────
+
+// What each role may take off a sale unaided. Anything beyond it needs someone
+// with more authority to approve at the terminal, which is the difference
+// between a discount that is merely recorded and one that was actually allowed.
+//
+// Configurable per deployment because the answer is a commercial decision, not
+// an engineering one: a market stall and a franchise chain draw this line in
+// very different places.
+model DiscountPolicy {
+  role          String   @id // OWNER | MANAGER | CASHIER | KITCHEN
+  // Ceiling on any single line's discount against that line, and on the
+  // cart's total discount against its subtotal. 1000 is 10%.
+  maxPercentBps Int      @default(0)
+  // Absolute ceiling in sen on the whole sale's discount. Null is no ceiling —
+  // a percentage alone stops meaning much on a RM10,000 basket.
+  maxAmountSen  Int?
+  updatedAt     DateTime @updatedAt
+}
+
+// Every approval attempt, successful or not, so a PIN cannot be ground down
+// one guess at a time. Six digits is a small space, and the terminal is on the
+// shop floor.
+model ApprovalAttempt {
+  id         String   @id @default(cuid())
+  action     String // DISCOUNT
+  registerId String?
+  approverId String? // only on success — a failure has no identified user
+  success    Boolean
+  createdAt  DateTime @default(now())
+
+  @@index([registerId, createdAt])
 }
 
 // ── Catalog ───────────────────────────────────────────────────────────────────
@@ -103,12 +138,49 @@ model Product {
   category    Category? @relation(fields: [categoryId], references: [id])
   description String?
   imageUrl    String?
-  taxCode     String    @default("SST8") // SST8 | SST6 | ZRL | EXEMPT
+  // A foreign key rather than free text: a typo here used to be discoverable
+  // only at the till, as a refused sale, on whichever item nobody had sold yet.
+  taxCode     String    @default("SST8")
+  tax         TaxCode   @relation(fields: [taxCode], references: [code])
   isComposite Boolean   @default(false)
   active      Boolean   @default(true)
   createdAt   DateTime  @default(now())
 
   variants Variant[]
+}
+
+// ── Tax ───────────────────────────────────────────────────────────────────────
+
+model TaxCode {
+  code   String  @id // SST8 | SST6 | ZRL | EXEMPT | ...
+  name   String // shown in the back office and on the rate history
+  active Boolean @default(true)
+
+  rates    TaxRate[]
+  products Product[]
+}
+
+// Rates are append-only and effective-dated, never edited in place.
+//
+// A rate change arrives on a gazetted date — Malaysian service tax went from 6%
+// to 8% on 1 March 2024 — so the system has to know both the old rate and the
+// new one, and which applied when. Editing a row instead would silently restate
+// what every historical order was charged, and those orders are what the
+// merchant filed their SST return against.
+model TaxRate {
+  id            String   @id @default(cuid())
+  code          String
+  taxCode       TaxCode  @relation(fields: [code], references: [code])
+  // Basis points: 800 is 8%. An integer, so extracting tax from a
+  // tax-inclusive price stays exact integer arithmetic end to end.
+  rateBps       Int
+  effectiveFrom DateTime
+  note          String? // e.g. the gazette or budget announcement it came from
+  createdAt     DateTime @default(now())
+  createdById   String?
+
+  @@unique([code, effectiveFrom])
+  @@index([code, effectiveFrom])
 }
 
 model Variant {
@@ -182,32 +254,36 @@ model Customer {
 // ── Orders & payments ─────────────────────────────────────────────────────────
 
 model Order {
-  id                 String    @id @default(cuid())
-  orderNo            String    @unique
-  idempotencyKey     String    @unique
-  outletId           String
-  outlet             Outlet    @relation(fields: [outletId], references: [id])
-  registerId         String?
-  register           Register? @relation(fields: [registerId], references: [id])
-  staffId            String?
-  staff              User?     @relation(fields: [staffId], references: [id])
-  customerId         String?
-  customer           Customer? @relation(fields: [customerId], references: [id])
+  id                   String    @id @default(cuid())
+  orderNo              String    @unique
+  idempotencyKey       String    @unique
+  outletId             String
+  outlet               Outlet    @relation(fields: [outletId], references: [id])
+  registerId           String?
+  register             Register? @relation(fields: [registerId], references: [id])
+  staffId              String?
+  staff                User?     @relation("OrderStaff", fields: [staffId], references: [id])
+  // Who authorised a discount beyond the seller's own limit. Null when the
+  // sale carried no discount, or one the seller could give on their own.
+  discountApprovedById String?
+  discountApprovedBy   User?     @relation("OrderDiscountApprover", fields: [discountApprovedById], references: [id])
+  customerId           String?
+  customer             Customer? @relation(fields: [customerId], references: [id])
   // The shift that was open on this register when the sale landed. Null means
   // the sale happened outside any shift — it can never be cashed up, which is
   // exactly why the order path audits that case.
-  shiftId            String?
-  shift              Shift?    @relation(fields: [shiftId], references: [id])
-  eventId            String?
-  status             String    @default("COMPLETED") // OPEN|HELD|COMPLETED|VOIDED|REFUNDED|PARTIAL_REFUND
-  subtotal           Int
-  discountTotal      Int       @default(0)
-  taxTotal           Int       @default(0)
-  roundingAdjustment Int       @default(0)
-  total              Int
-  offline            Boolean   @default(false)
-  placedAt           DateTime  @default(now()) // device time
-  createdAt          DateTime  @default(now()) // server time
+  shiftId              String?
+  shift                Shift?    @relation(fields: [shiftId], references: [id])
+  eventId              String?
+  status               String    @default("COMPLETED") // OPEN|HELD|COMPLETED|VOIDED|REFUNDED|PARTIAL_REFUND
+  subtotal             Int
+  discountTotal        Int       @default(0)
+  taxTotal             Int       @default(0)
+  roundingAdjustment   Int       @default(0)
+  total                Int
+  offline              Boolean   @default(false)
+  placedAt             DateTime  @default(now()) // device time
+  createdAt            DateTime  @default(now()) // server time
 
   lines    OrderLine[]
   payments Payment[]
