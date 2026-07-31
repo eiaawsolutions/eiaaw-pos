@@ -60,6 +60,7 @@ export default defineConfig({
       // contract. The worker is a scheduler and earns no gate.
       include: [
         'apps/api/src/orders/**',
+        'apps/api/src/catalog/**',
         'apps/api/src/payments/**',
         'apps/api/src/shifts/**',
         'apps/api/src/sync/**',
@@ -80,6 +81,7 @@ export default defineConfig({
         // this list — it classifies which sync failures are worth retrying,
         // which is a decision, and it is gated below.
         'apps/api/src/orders/orders.controller.ts',
+        'apps/api/src/catalog/catalog.controller.ts',
         'apps/api/src/payments/payments.controller.ts',
         'apps/api/src/shifts/shifts.controller.ts',
         'apps/api/src/reports/reports.controller.ts',
@@ -114,10 +116,10 @@ export default defineConfig({
         // Ratchet: the aggregate over everything in `include`, a point below
         // where it stands. Raise these as suites land — never lower them to
         // make a run pass.
-        statements: 48,
-        branches: 43,
-        functions: 44,
-        lines: 49,
+        statements: 56,
+        branches: 48,
+        functions: 52,
+        lines: 56,
 
         // ── Covered. Held just under today's figures: enough slack to
         //    refactor, not enough to quietly drop a branch. ──
@@ -137,6 +139,18 @@ export default defineConfig({
           functions: 95,
           lines: 90,
         },
+        '**/apps/api/src/catalog/tax.service.ts': {
+          statements: 78,
+          branches: 62,
+          functions: 80,
+          lines: 75,
+        },
+        '**/apps/api/src/orders/discount-authority.service.ts': {
+          statements: 82,
+          branches: 62,
+          functions: 72,
+          lines: 83,
+        },
         '**/apps/api/src/sync/sync.controller.ts': {
           statements: 95,
           branches: 75,
@@ -149,6 +163,14 @@ export default defineConfig({
         //    and so landing a suite is a one-line edit rather than an
         //    archaeology exercise. Each of these is a workstream. ──
 
+        // Barcode resolution on the hot path of every scan, and the only write
+        // path into the catalog the till prices from.
+        '**/apps/api/src/catalog/catalog.service.ts': {
+          statements: 0,
+          branches: 0,
+          functions: 0,
+          lines: 0,
+        },
         // Prices nothing, but moves money: PSP intents, webhook signature
         // verification, capture/refund state. Untested webhook handling is how
         // a forged callback marks an order paid.

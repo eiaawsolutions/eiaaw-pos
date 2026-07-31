@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { prisma } from './setup';
-import { line, makeOutlet, makeProduct, makeRegister, makeUser, orderDto } from './fixtures';
-import { OrdersService } from '../src/orders/orders.service';
+import {
+  line,
+  makeOutlet,
+  makeProduct,
+  makeRegister,
+  makeUser,
+  orderDto,
+  ordersService,
+  seedPolicyDefaults,
+} from './fixtures';
+import type { OrdersService } from '../src/orders/orders.service';
 import { SyncController } from '../src/sync/sync.controller';
 
 /**
@@ -18,7 +27,8 @@ describe('sync — draining the offline outbox', () => {
   let staffId: string;
 
   beforeEach(async () => {
-    orders = new OrdersService(prisma as never);
+    await seedPolicyDefaults();
+    orders = ordersService();
     sync = new SyncController(orders);
     outletId = (await makeOutlet()).id;
     registerId = (await makeRegister(outletId)).id;

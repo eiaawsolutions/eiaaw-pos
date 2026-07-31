@@ -8,8 +8,10 @@ import {
   makeRegister,
   makeUser,
   orderDto,
+  ordersService,
+  seedPolicyDefaults,
 } from './fixtures';
-import { OrdersService } from '../src/orders/orders.service';
+import type { OrdersService } from '../src/orders/orders.service';
 import { TAX } from '@eiaaw/shared';
 
 /**
@@ -27,11 +29,14 @@ describe('orders — the server is the pricing authority', () => {
   let staffId: string;
 
   beforeEach(async () => {
-    orders = new OrdersService(prisma as never);
+    await seedPolicyDefaults();
+    orders = ordersService();
     const outlet = await makeOutlet();
     outletId = outlet.id;
     registerId = (await makeRegister(outletId)).id;
-    staffId = (await makeUser()).id;
+    // An owner sells here: these cases are about how a sale is priced, not
+    // about who may authorise a discount, which has its own suite.
+    staffId = (await makeUser({ role: 'OWNER' })).id;
   });
 
   describe('unit price', () => {
@@ -201,11 +206,18 @@ describe('orders — the server is the pricing authority', () => {
       );
 
       expect(order.total).toBe(540);
-      expect(order.taxTotal).toBe(TAX.inclusiveComponent(540, 'SST8')); // 40
+      expect(order.taxTotal).toBe(TAX.inclusiveComponent(540, 800)); // 40
     });
 
-    it('fails the sale on a mis-configured tax code rather than quietly zero-rating it', async () => {
-      const { variant } = await makeProduct({ outletId, price: 1000, taxCode: 'SST10' });
+    it('cannot be given a tax code the catalog does not know', async () => {
+      // The foreign key makes the old failure mode unreachable: a typo is now
+      // caught when the product is saved, not at the till on the first sale.
+      await expect(makeProduct({ outletId, price: 1000, taxCode: 'SST10' })).rejects.toThrow();
+    });
+
+    it('fails the sale when the code has no rate in force rather than zero-rating it', async () => {
+      await prisma.taxCode.create({ data: { code: 'UNRATED', name: 'Awaiting a rate' } });
+      const { variant } = await makeProduct({ outletId, price: 1000, taxCode: 'UNRATED' });
 
       await expect(
         orders.create(
@@ -217,7 +229,7 @@ describe('orders — the server is the pricing authority', () => {
             payments: [{ tender: 'CASH', amount: 1000 }],
           }),
         ),
-      ).rejects.toThrow(/tax code/i);
+      ).rejects.toThrow(/rate/i);
     });
   });
 

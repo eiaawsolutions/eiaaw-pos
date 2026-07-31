@@ -1,6 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from './setup';
 import type { CreateOrderDto } from '@eiaaw/shared';
+import { OrdersService } from '../src/orders/orders.service';
+import { TaxService } from '../src/catalog/tax.service';
+import { DiscountAuthorityService } from '../src/orders/discount-authority.service';
+
+/**
+ * An OrdersService with its real collaborators. Stubbing the tax resolver or
+ * the authority check here would mean the money path under test is not the one
+ * that runs in production, which is the whole point of an integration suite.
+ */
+export function ordersService() {
+  return new OrdersService(
+    prisma as never,
+    new TaxService(prisma as never) as never,
+    new DiscountAuthorityService(prisma as never) as never,
+  );
+}
+
+/** Tax codes and discount policies, which almost every fixture depends on. */
+export async function seedPolicyDefaults() {
+  await seedTaxCodes();
+  await seedDiscountPolicies();
+}
 
 /**
  * Fixture builders for the integration suite.
@@ -9,6 +31,38 @@ import type { CreateOrderDto } from '@eiaaw/shared';
  * and generates one otherwise — so a test only spells out the parts of the
  * world it actually reasons about.
  */
+
+/**
+ * The statutory tax codes, with a rate already in force. Products carry a
+ * foreign key to these, so almost every fixture needs them present first.
+ */
+export async function seedTaxCodes() {
+  const codes = [
+    { code: 'SST8', name: 'Service Tax 8%', rateBps: 800 },
+    { code: 'SST6', name: 'Service Tax 6%', rateBps: 600 },
+    { code: 'ZRL', name: 'Zero-rated', rateBps: 0 },
+    { code: 'EXEMPT', name: 'Exempt', rateBps: 0 },
+  ];
+  const long_ago = new Date('2000-01-01T00:00:00Z');
+  for (const c of codes) {
+    await prisma.taxCode.create({ data: { code: c.code, name: c.name } });
+    await prisma.taxRate.create({
+      data: { code: c.code, rateBps: c.rateBps, effectiveFrom: long_ago },
+    });
+  }
+}
+
+/** Default discount authority: what each role may take off a sale unaided. */
+export async function seedDiscountPolicies() {
+  await prisma.discountPolicy.createMany({
+    data: [
+      { role: 'OWNER', maxPercentBps: 10_000, maxAmountSen: null },
+      { role: 'MANAGER', maxPercentBps: 5000, maxAmountSen: 50_000 },
+      { role: 'CASHIER', maxPercentBps: 1000, maxAmountSen: 5000 },
+      { role: 'KITCHEN', maxPercentBps: 0, maxAmountSen: 0 },
+    ],
+  });
+}
 
 export async function makeOutlet(
   opts: { id?: string; name?: string; timezone?: string } = {},
