@@ -13,6 +13,19 @@ export interface PaymentIntentResult {
   redirectUrl?: string;
 }
 
+/** A verified webhook, normalised to the fields the sink is allowed to act on. */
+export interface WebhookVerification {
+  valid: boolean;
+  event?: {
+    /** Stable per delivery. Without it a replay cannot be told from a retry. */
+    eventId?: string;
+    providerRef?: string;
+    status?: string;
+    /** Sen, as the PSP reports it — checked against what we recorded taking. */
+    amount?: number;
+  };
+}
+
 export interface PaymentProvider {
   readonly name: string;
   /** Create a charge/intent for `amount` sen. Must be idempotent on idempotencyKey. */
@@ -26,6 +39,10 @@ export interface PaymentProvider {
   getStatus(providerRef: string): Promise<PaymentIntentResult>;
   /** Rail-native refund where supported */
   refund(providerRef: string, amount: number): Promise<{ ok: boolean; refundRef?: string }>;
-  /** Verify webhook signature and normalize the event */
-  verifyWebhook(headers: Record<string, string>, rawBody: string): { valid: boolean; event?: any };
+  /**
+   * Verify the signature over the body **as it arrived on the wire** and
+   * normalise the event. Never pass a re-serialised object: the digest would
+   * be taken over different bytes than the PSP signed.
+   */
+  verifyWebhook(headers: Record<string, string>, rawBody: string): WebhookVerification;
 }

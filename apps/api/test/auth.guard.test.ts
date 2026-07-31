@@ -1,9 +1,26 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { CanActivate, Controller, ExecutionContext, Get, INestApplication, UseGuards } from '@nestjs/common';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import {
+  CanActivate,
+  Controller,
+  ExecutionContext,
+  ForbiddenException,
+  Get,
+  INestApplication,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
-import { AuthGuard, Roles } from '../src/common/auth.guard';
+import { prisma } from './setup';
+import { makeOutlet, makeUser } from './fixtures';
+import { PrismaService } from '../src/prisma/prisma.service';
+import {
+  AuthGuard,
+  Roles,
+  requireOutletScope,
+  resolveOutletScope,
+  type AuthenticatedUser,
+} from '../src/common/auth.guard';
 
 const SECRET = 'guard-test-secret';
 
@@ -11,13 +28,11 @@ const SECRET = 'guard-test-secret';
  * What AuthGuard left on the request, captured by a guard that runs after it.
  *
  * A `@Req()` parameter would read better, but Nest's parameter decorators are a
- * legacy TypeScript feature the test transform does not enable: it looks for a
- * tsconfig that opts in, resolves that per file, and apps/api's build config
- * deliberately scopes `include` to src. A probe controller declared in a test
- * file therefore fails to parse at the first `@Req()`. Guards need only class
- * and method decorators, which parse everywhere.
+ * legacy TypeScript feature the test transform only enables where it finds a
+ * tsconfig saying so — see test/tsconfig.json, which exists for exactly this.
+ * Guards need only class and method decorators.
  */
-let seenUser: unknown;
+let seenUser: AuthenticatedUser | undefined;
 
 class CaptureUser implements CanActivate {
   canActivate(ctx: ExecutionContext): boolean {
@@ -26,12 +41,6 @@ class CaptureUser implements CanActivate {
   }
 }
 
-/**
- * Probe routes. A real Nest pipeline rather than a hand-rolled ExecutionContext:
- * most of what can go wrong in a guard is in the wiring — how the header
- * arrives, how @Roles metadata resolves between handler and class — and a mock
- * context asserts only that the body of the method does what it says.
- */
 @Controller('probe')
 @UseGuards(AuthGuard, CaptureUser)
 class ProbeController {
@@ -73,11 +82,14 @@ class VaultController {
 describe('AuthGuard', () => {
   let app: INestApplication;
   let jwt: JwtService;
+  let ownerId: string;
+  let cashierId: string;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [JwtModule.register({ global: true, secret: SECRET, signOptions: { expiresIn: '1h' } })],
       controllers: [ProbeController, VaultController],
+      providers: [{ provide: PrismaService, useValue: prisma }],
     }).compile();
     app = moduleRef.createNestApplication();
     await app.init();
@@ -88,9 +100,17 @@ describe('AuthGuard', () => {
     await app?.close();
   });
 
-  const tokenFor = (claims: Record<string, unknown>) => jwt.sign(claims);
-  const owner = () => tokenFor({ sub: 'u-owner', role: 'OWNER', name: 'Owner' });
-  const cashier = () => tokenFor({ sub: 'u-cashier', role: 'CASHIER', name: 'Cashier' });
+  beforeEach(async () => {
+    // The guard reads the caller from the database now, so the token alone is
+    // no longer enough to be anybody.
+    ownerId = (await makeUser({ role: 'OWNER' })).id;
+    cashierId = (await makeUser({ role: 'CASHIER' })).id;
+    seenUser = undefined;
+  });
+
+  const bearer = (sub: string) => `Bearer ${jwt.sign({ sub })}`;
+  const owner = () => bearer(ownerId);
+  const cashier = () => bearer(cashierId);
 
   describe('presenting a token', () => {
     it('refuses a request with no Authorization header', async () => {
@@ -105,7 +125,10 @@ describe('AuthGuard', () => {
     });
 
     it('refuses a bare token with no scheme', async () => {
-      await request(app.getHttpServer()).get('/probe/open').set('Authorization', owner()).expect(401);
+      await request(app.getHttpServer())
+        .get('/probe/open')
+        .set('Authorization', jwt.sign({ sub: ownerId }))
+        .expect(401);
     });
 
     it('refuses an empty Bearer credential', async () => {
@@ -120,7 +143,7 @@ describe('AuthGuard', () => {
     });
 
     it('refuses a token signed with another secret', async () => {
-      const forged = new JwtService({ secret: 'not-our-secret' }).sign({ sub: 'u1', role: 'OWNER' });
+      const forged = new JwtService({ secret: 'not-our-secret' }).sign({ sub: ownerId });
       await request(app.getHttpServer())
         .get('/probe/open')
         .set('Authorization', `Bearer ${forged}`)
@@ -128,7 +151,7 @@ describe('AuthGuard', () => {
     });
 
     it('refuses an expired token', async () => {
-      const stale = jwt.sign({ sub: 'u1', role: 'OWNER' }, { expiresIn: '-1s' });
+      const stale = jwt.sign({ sub: ownerId }, { expiresIn: '-1s' });
       await request(app.getHttpServer())
         .get('/probe/open')
         .set('Authorization', `Bearer ${stale}`)
@@ -136,7 +159,7 @@ describe('AuthGuard', () => {
     });
 
     it('refuses a token whose signature has been tampered with', async () => {
-      const [header, payload] = owner().split('.');
+      const [header, payload] = jwt.sign({ sub: ownerId }).split('.');
       const tampered = `${header}.${payload}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`;
       await request(app.getHttpServer())
         .get('/probe/open')
@@ -145,32 +168,32 @@ describe('AuthGuard', () => {
     });
 
     it('refuses an unsigned "alg: none" token', async () => {
-      // The classic JWT forgery: strip the signature and declare no algorithm.
       const none = (obj: object) => Buffer.from(JSON.stringify(obj)).toString('base64url');
-      const forged = `${none({ alg: 'none', typ: 'JWT' })}.${none({ sub: 'u1', role: 'OWNER' })}.`;
+      const forged = `${none({ alg: 'none', typ: 'JWT' })}.${none({ sub: ownerId })}.`;
       await request(app.getHttpServer())
         .get('/probe/open')
         .set('Authorization', `Bearer ${forged}`)
         .expect(401);
     });
 
-    it('admits a valid token and puts the claims on the request', async () => {
-      seenUser = undefined;
+    it('refuses a well-formed token with no subject', async () => {
       await request(app.getHttpServer())
         .get('/probe/open')
-        .set('Authorization', `Bearer ${owner()}`)
-        .expect(200);
-      expect(seenUser).toMatchObject({ sub: 'u-owner', role: 'OWNER', name: 'Owner' });
+        .set('Authorization', `Bearer ${jwt.sign({ role: 'OWNER' })}`)
+        .expect(401);
+    });
+
+    it('admits a valid token and puts the caller on the request', async () => {
+      await request(app.getHttpServer()).get('/probe/open').set('Authorization', owner()).expect(200);
+      expect(seenUser).toMatchObject({ sub: ownerId, role: 'OWNER' });
     });
 
     it('says nothing about why a credential was rejected', async () => {
-      // Expired, forged and malformed must be indistinguishable: anything that
-      // narrows it down tells an attacker which half of the guess was right.
       const bodies = await Promise.all(
         [
           'Bearer not-a-token',
-          `Bearer ${jwt.sign({ sub: 'u1' }, { expiresIn: '-1s' })}`,
-          `Bearer ${new JwtService({ secret: 'other' }).sign({ sub: 'u1' })}`,
+          `Bearer ${jwt.sign({ sub: ownerId }, { expiresIn: '-1s' })}`,
+          `Bearer ${new JwtService({ secret: 'other' }).sign({ sub: ownerId })}`,
         ].map((auth) =>
           request(app.getHttpServer())
             .get('/probe/open')
@@ -182,85 +205,105 @@ describe('AuthGuard', () => {
     });
   });
 
+  describe('the token is not the last word', () => {
+    it('refuses a user deactivated since the token was issued', async () => {
+      // Tokens last twelve hours. Without this, someone let go at the start of
+      // a shift keeps everything they had until the token expires.
+      const token = cashier();
+      await request(app.getHttpServer()).get('/probe/open').set('Authorization', token).expect(200);
+
+      await prisma.user.update({ where: { id: cashierId }, data: { active: false } });
+      await request(app.getHttpServer()).get('/probe/open').set('Authorization', token).expect(401);
+    });
+
+    it('refuses a user who no longer exists', async () => {
+      const token = cashier();
+      await prisma.user.delete({ where: { id: cashierId } });
+      await request(app.getHttpServer()).get('/probe/open').set('Authorization', token).expect(401);
+    });
+
+    it('takes the role from the database, not from the claim', async () => {
+      // A token forged with role: OWNER buys nothing, and a genuine demotion
+      // takes effect on the next request rather than at expiry.
+      const claimsOwner = `Bearer ${jwt.sign({ sub: cashierId, role: 'OWNER' })}`;
+      await request(app.getHttpServer()).get('/probe/managers').set('Authorization', claimsOwner).expect(403);
+    });
+
+    it('applies a promotion without waiting for a new token', async () => {
+      const token = cashier();
+      await request(app.getHttpServer()).get('/probe/managers').set('Authorization', token).expect(403);
+
+      await prisma.user.update({ where: { id: cashierId }, data: { role: 'MANAGER' } });
+      await request(app.getHttpServer()).get('/probe/managers').set('Authorization', token).expect(200);
+    });
+
+    it('carries the outlet the user is pinned to', async () => {
+      const outlet = await makeOutlet();
+      await prisma.user.update({ where: { id: cashierId }, data: { outletId: outlet.id } });
+
+      await request(app.getHttpServer()).get('/probe/open').set('Authorization', cashier()).expect(200);
+      expect(seenUser?.outletId).toBe(outlet.id);
+    });
+  });
+
   describe('role requirements', () => {
     it('lets any authenticated user through a route with no @Roles', async () => {
-      await request(app.getHttpServer())
-        .get('/probe/open')
-        .set('Authorization', `Bearer ${cashier()}`)
-        .expect(200);
+      await request(app.getHttpServer()).get('/probe/open').set('Authorization', cashier()).expect(200);
     });
 
     it('admits a role on the list', async () => {
-      await request(app.getHttpServer())
-        .get('/probe/managers')
-        .set('Authorization', `Bearer ${owner()}`)
-        .expect(200);
+      await request(app.getHttpServer()).get('/probe/managers').set('Authorization', owner()).expect(200);
     });
 
     it('refuses a role that is not, with 403 rather than 401', async () => {
-      // The distinction matters to the terminal: 401 means log in again, 403
-      // means fetch someone who can.
-      await request(app.getHttpServer())
-        .get('/probe/managers')
-        .set('Authorization', `Bearer ${cashier()}`)
-        .expect(403);
-    });
-
-    it('refuses a token carrying no role claim at all', async () => {
-      const roleless = tokenFor({ sub: 'u-nobody' });
-      await request(app.getHttpServer())
-        .get('/probe/managers')
-        .set('Authorization', `Bearer ${roleless}`)
-        .expect(403);
-    });
-
-    it('refuses a role invented in the token', async () => {
-      const invented = tokenFor({ sub: 'u1', role: 'SUPERUSER' });
-      await request(app.getHttpServer())
-        .get('/probe/managers')
-        .set('Authorization', `Bearer ${invented}`)
-        .expect(403);
+      await request(app.getHttpServer()).get('/probe/managers').set('Authorization', cashier()).expect(403);
     });
 
     it('treats @Roles() with no arguments as no restriction', async () => {
-      await request(app.getHttpServer())
-        .get('/probe/nobody')
-        .set('Authorization', `Bearer ${cashier()}`)
-        .expect(200);
+      await request(app.getHttpServer()).get('/probe/nobody').set('Authorization', cashier()).expect(200);
     });
 
     it('applies a class-level @Roles to a handler that declares none', async () => {
-      await request(app.getHttpServer())
-        .get('/vault/inherited')
-        .set('Authorization', `Bearer ${owner()}`)
-        .expect(200);
-      await request(app.getHttpServer())
-        .get('/vault/inherited')
-        .set('Authorization', `Bearer ${cashier()}`)
-        .expect(403);
+      await request(app.getHttpServer()).get('/vault/inherited').set('Authorization', owner()).expect(200);
+      await request(app.getHttpServer()).get('/vault/inherited').set('Authorization', cashier()).expect(403);
     });
 
     it('lets the handler override the class rather than adding to it', async () => {
-      // getAllAndOverride, not getAllAndMerge: the nearest declaration wins
-      // outright, so an owner is refused a route narrowed to cashiers.
-      await request(app.getHttpServer())
-        .get('/vault/overridden')
-        .set('Authorization', `Bearer ${cashier()}`)
-        .expect(200);
-      await request(app.getHttpServer())
-        .get('/vault/overridden')
-        .set('Authorization', `Bearer ${owner()}`)
-        .expect(403);
+      await request(app.getHttpServer()).get('/vault/overridden').set('Authorization', cashier()).expect(200);
+      await request(app.getHttpServer()).get('/vault/overridden').set('Authorization', owner()).expect(403);
     });
 
     it('checks the credential before the role', async () => {
-      // A bad token on a role-guarded route is 401, not 403 — otherwise the
-      // response distinguishes "your token is junk" from "you are not senior
-      // enough", which is a probe for which roles guard what.
       await request(app.getHttpServer())
         .get('/probe/managers')
         .set('Authorization', 'Bearer rubbish')
         .expect(401);
     });
+  });
+});
+
+describe('outlet scope', () => {
+  const pinned: AuthenticatedUser = { sub: 'u1', role: 'CASHIER', outletId: 'outlet-a' };
+  const roaming: AuthenticatedUser = { sub: 'u2', role: 'OWNER', outletId: null };
+
+  it('confines a pinned user to their own outlet whatever they ask for', () => {
+    expect(resolveOutletScope(pinned, undefined)).toBe('outlet-a');
+    expect(resolveOutletScope(pinned, 'outlet-a')).toBe('outlet-a');
+    expect(() => resolveOutletScope(pinned, 'outlet-b')).toThrow(ForbiddenException);
+  });
+
+  it('lets an unpinned user choose, including everything', () => {
+    expect(resolveOutletScope(roaming, 'outlet-b')).toBe('outlet-b');
+    expect(resolveOutletScope(roaming, undefined)).toBeUndefined();
+  });
+
+  it('treats an empty outlet id as no request rather than as one', () => {
+    expect(resolveOutletScope(roaming, '')).toBeUndefined();
+  });
+
+  it('insists on an outlet where one is required', () => {
+    expect(requireOutletScope(pinned, undefined)).toBe('outlet-a');
+    expect(() => requireOutletScope(roaming, undefined)).toThrow(ForbiddenException);
+    expect(requireOutletScope(roaming, 'outlet-b')).toBe('outlet-b');
   });
 });

@@ -36,6 +36,7 @@ model Outlet {
   orders    Order[]
   shifts    Shift[]
   sequences OrderSequence[]
+  staff     User[]
 }
 
 // One row per outlet per trading day, incremented atomically to allocate the
@@ -78,6 +79,12 @@ model User {
   passwordHash String
   role         String   @default("CASHIER") // OWNER | MANAGER | CASHIER | KITCHEN
   active       Boolean  @default(true)
+  // The outlet this user works at. Null means unrestricted — an owner or a
+  // roaming manager. Anyone pinned to an outlet cannot read or move stock,
+  // takings or reports belonging to another: every outlet-scoped endpoint used
+  // to take the outlet id straight from the query string and trust it.
+  outletId     String?
+  outlet       Outlet?  @relation(fields: [outletId], references: [id])
   createdAt    DateTime @default(now())
 
   orders            Order[]        @relation("OrderStaff")
@@ -105,6 +112,42 @@ model DiscountPolicy {
   // a percentage alone stops meaning much on a RM10,000 basket.
   maxAmountSen  Int?
   updatedAt     DateTime @updatedAt
+}
+
+// Every sign-in attempt, successful or not. /auth/login and /auth/pin are the
+// only unauthenticated doors into the system and had no counter on either, so a
+// password or a six-digit PIN was however many requests an attacker cared to
+// send.
+//
+// In the database rather than in process memory because this runs behind
+// replicas: an in-memory counter is per-instance, and an attacker spreading
+// attempts across them multiplies their allowance by the replica count.
+model LoginAttempt {
+  id         String   @id @default(cuid())
+  kind       String // PASSWORD | PIN
+  // Lowercased email for a password attempt; null for a PIN, which identifies
+  // nobody until it matches. Never the credential itself.
+  identifier String?
+  ip         String?
+  success    Boolean
+  createdAt  DateTime @default(now())
+
+  @@index([kind, identifier, createdAt])
+  @@index([kind, ip, createdAt])
+}
+
+// Webhook deliveries already applied, so a captured payload cannot be replayed.
+// A PSP retries on any non-2xx and the network retries under it, so redelivery
+// is ordinary traffic — the difference between a retry and an attack is only
+// who sent it.
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  provider    String
+  eventId     String
+  providerRef String?
+  receivedAt  DateTime @default(now())
+
+  @@unique([provider, eventId])
 }
 
 // Every approval attempt, successful or not, so a PIN cannot be ground down

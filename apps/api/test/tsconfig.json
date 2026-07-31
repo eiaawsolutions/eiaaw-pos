@@ -4,10 +4,19 @@
   // nothing here would get the legacy decorator transform Nest relies on.
   // Without it a probe controller declared in a test emits `@Controller(...)`
   // verbatim and Node rejects it as a syntax error.
+  //
+  // Type-checking of these files is done by ../tsconfig.test.json, which sees
+  // src and test together. This one only describes how to transform them, so
+  // it emits nothing and inherits no output layout to disagree about.
   "extends": "../tsconfig.json",
   "compilerOptions": {
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": true
+    "emitDecoratorMetadata": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "rootDir": "..",
+    "types": ["node", "vitest/globals"]
   },
   "include": ["."]
 }

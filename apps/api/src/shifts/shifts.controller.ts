@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ShiftsService } from './shifts.service';
-import { AuthGuard } from '../common/auth.guard';
+import { AuthGuard, requireOutletScope } from '../common/auth.guard';
 
 @Controller('shifts')
 @UseGuards(AuthGuard)
@@ -9,7 +9,13 @@ export class ShiftsController {
 
   @Post('open')
   open(@Body() body: { outletId: string; registerId: string; openingFloat: number }, @Req() req: any) {
-    return this.shifts.open({ ...body, userId: req.user.sub });
+    // A till belongs to an outlet, so opening one at somebody else's is not a
+    // thing a pinned user gets to do by naming it in the body.
+    return this.shifts.open({
+      ...body,
+      outletId: requireOutletScope(req.user, body?.outletId),
+      userId: req.user.sub,
+    });
   }
 
   @Post('close')
