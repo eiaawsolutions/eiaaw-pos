@@ -116,10 +116,10 @@ export default defineConfig({
         // Ratchet: the aggregate over everything in `include`, a point below
         // where it stands. Raise these as suites land — never lower them to
         // make a run pass.
-        statements: 59,
-        branches: 50,
-        functions: 55,
-        lines: 59,
+        statements: 74,
+        branches: 63,
+        functions: 68,
+        lines: 74,
 
         // ── Covered. Held just under today's figures: enough slack to
         //    refactor, not enough to quietly drop a branch. ──
@@ -148,6 +148,34 @@ export default defineConfig({
           branches: 85,
           functions: 100,
           lines: 100,
+        },
+        // The only unauthenticated door into the system, and the only place a
+        // credential is checked. Held alongside the guard.
+        '**/apps/api/src/auth/auth.service.ts': {
+          statements: 100,
+          branches: 82,
+          functions: 100,
+          lines: 100,
+        },
+        // Public, unauthenticated, and able to mark an order paid — the
+        // signature is the whole boundary.
+        '**/apps/api/src/payments/payments.service.ts': {
+          statements: 93,
+          branches: 78,
+          functions: 100,
+          lines: 95,
+        },
+        '**/apps/api/src/payments/providers/mock.provider.ts': {
+          statements: 85,
+          branches: 88,
+          functions: 55,
+          lines: 84,
+        },
+        '**/apps/api/src/inventory/inventory.service.ts': {
+          statements: 85,
+          branches: 78,
+          functions: 48,
+          lines: 84,
         },
         '**/apps/api/src/catalog/tax.service.ts': {
           statements: 78,
@@ -181,16 +209,9 @@ export default defineConfig({
           functions: 0,
           lines: 0,
         },
-        // Prices nothing, but moves money: PSP intents, webhook signature
-        // verification, capture/refund state. Untested webhook handling is how
-        // a forged callback marks an order paid.
-        '**/apps/api/src/payments/**': { statements: 0, branches: 0, functions: 0, lines: 0 },
-        // The numbers the merchant files SST against.
+        // The numbers the merchant files SST against. Outlet-scoped now, but
+        // the arithmetic itself is still asserted by nothing.
         '**/apps/api/src/reports/**': { statements: 0, branches: 0, functions: 0, lines: 0 },
-        // Stock movements and the audit trail behind them.
-        '**/apps/api/src/inventory/**': { statements: 0, branches: 0, functions: 0, lines: 0 },
-        // Login, PIN switching, token issuance.
-        '**/apps/api/src/auth/**': { statements: 0, branches: 0, functions: 0, lines: 0 },
         // The zero-hallucination ingest contract — the promise that the system
         // cannot sell an assumed price — is currently asserted by nothing.
         '**/apps/api/src/ai/**': { statements: 0, branches: 0, functions: 0, lines: 0 },

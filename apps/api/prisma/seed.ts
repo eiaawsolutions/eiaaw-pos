@@ -71,15 +71,19 @@ async function main() {
       role: 'OWNER',
     },
   });
+  // Pinned to the outlet: a cashier can only see and move what belongs to the
+  // shop they work at. The owner above is left unpinned, which is how one
+  // account sees the whole business.
   await prisma.user.upsert({
     where: { email: 'cashier@eiaawsolutions.com' },
-    update: {},
+    update: { outletId: outlet.id },
     create: {
       name: 'Demo Cashier',
       email: 'cashier@eiaawsolutions.com',
       passwordHash: await bcrypt.hash('Cashier123!', 10),
       pin: await bcrypt.hash('111111', 10),
       role: 'CASHIER',
+      outletId: outlet.id,
     },
   });
 
