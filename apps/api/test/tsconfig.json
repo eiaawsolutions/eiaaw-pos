@@ -1,0 +1,13 @@
+{
+  // Discovered by the test transform, which resolves a tsconfig per file and
+  // otherwise finds ../tsconfig.json — whose `include` is scoped to src, so
+  // nothing here would get the legacy decorator transform Nest relies on.
+  // Without it a probe controller declared in a test emits `@Controller(...)`
+  // verbatim and Node rejects it as a syntax error.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  },
+  "include": ["."]
+}

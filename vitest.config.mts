@@ -116,10 +116,10 @@ export default defineConfig({
         // Ratchet: the aggregate over everything in `include`, a point below
         // where it stands. Raise these as suites land — never lower them to
         // make a run pass.
-        statements: 56,
-        branches: 48,
-        functions: 52,
-        lines: 56,
+        statements: 59,
+        branches: 50,
+        functions: 55,
+        lines: 59,
 
         // ── Covered. Held just under today's figures: enough slack to
         //    refactor, not enough to quietly drop a branch. ──
@@ -138,6 +138,16 @@ export default defineConfig({
           branches: 76,
           functions: 95,
           lines: 90,
+        },
+        // Every authorisation decision in the API passes through here, so it is
+        // held at the top: no statement of it goes unexercised, and the only
+        // slack is on branches, where the short-circuits in `roles?.length &&`
+        // have arms that cannot be reached independently.
+        '**/apps/api/src/common/auth.guard.ts': {
+          statements: 100,
+          branches: 85,
+          functions: 100,
+          lines: 100,
         },
         '**/apps/api/src/catalog/tax.service.ts': {
           statements: 78,
@@ -181,13 +191,6 @@ export default defineConfig({
         '**/apps/api/src/inventory/**': { statements: 0, branches: 0, functions: 0, lines: 0 },
         // Login, PIN switching, token issuance.
         '**/apps/api/src/auth/**': { statements: 0, branches: 0, functions: 0, lines: 0 },
-        // Every authorisation decision in the API passes through here.
-        '**/apps/api/src/common/auth.guard.ts': {
-          statements: 0,
-          branches: 0,
-          functions: 0,
-          lines: 0,
-        },
         // The zero-hallucination ingest contract — the promise that the system
         // cannot sell an assumed price — is currently asserted by nothing.
         '**/apps/api/src/ai/**': { statements: 0, branches: 0, functions: 0, lines: 0 },
