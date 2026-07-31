@@ -88,13 +88,19 @@ export class ReportsService {
   }
 
   /** Sales by staff — commission & performance view */
-  staffSales(date: string) {
+  staffSales(date: string, outletId?: string) {
     const start = new Date(date);
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
     return this.prisma.order.groupBy({
       by: ['staffId'],
-      where: { status: 'COMPLETED', createdAt: { gte: start, lt: end } },
+      // Scoped when the caller is pinned to an outlet: a manager at one shop
+      // has no business reading another shop's staff performance.
+      where: {
+        status: 'COMPLETED',
+        createdAt: { gte: start, lt: end },
+        ...(outletId ? { outletId } : {}),
+      },
       _sum: { total: true },
       _count: true,
     });

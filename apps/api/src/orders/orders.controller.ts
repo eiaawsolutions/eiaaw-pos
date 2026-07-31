@@ -1,7 +1,18 @@
-import { Body, Controller, Get, Param, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  NotFoundException,
+  Param,
+  Post,
+  Put,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { OrdersService } from './orders.service';
 import { DiscountAuthorityService } from './discount-authority.service';
-import { AuthGuard, Roles } from '../common/auth.guard';
+import { AuthGuard, Roles, requireOutletScope, resolveOutletScope } from '../common/auth.guard';
 import { CreateOrderDto } from '@eiaaw/shared';
 
 @Controller('orders')
@@ -44,17 +55,29 @@ export class OrdersController {
 
   @Post()
   create(@Body() dto: CreateOrderDto, @Req() req: any) {
-    return this.orders.create({ ...dto, staffId: dto.staffId ?? req.user.sub });
+    return this.orders.create({
+      ...dto,
+      // The seller is whoever holds the token. Taking it from the body let a
+      // sale — and any discount on it — be attributed to someone else.
+      staffId: req.user.sub,
+      outletId: requireOutletScope(req.user, dto?.outletId),
+    });
   }
 
   @Get()
-  list(@Query('outletId') outletId?: string) {
-    return this.orders.list(outletId);
+  list(@Query('outletId') outletId: string, @Req() req: any) {
+    return this.orders.list(resolveOutletScope(req.user, outletId));
   }
 
   @Get(':id')
-  get(@Param('id') id: string) {
-    return this.orders.get(id);
+  async get(@Param('id') id: string, @Req() req: any) {
+    const order = await this.orders.get(id);
+    // Not found and not yours read the same from outside, so order ids cannot
+    // be walked to discover which belong to another outlet.
+    if (!order || (req.user.outletId && order.outletId !== req.user.outletId)) {
+      throw new NotFoundException(`No order ${id}`);
+    }
+    return order;
   }
 
   @Post(':id/void')
