@@ -136,6 +136,31 @@ model LoginAttempt {
   @@index([kind, ip, createdAt])
 }
 
+// A payment started at the terminal, before any order exists.
+//
+// The terminal asks for a QR, shows it, and only posts the order once the
+// customer has paid — so at intent time there is nothing to hang the provider's
+// reference off. This row is that hook, and it is what makes `createIntent`
+// idempotent for a real gateway: Billplz has no idempotency key of its own, so
+// a double-tapped Charge button would otherwise open a second bill and invite
+// the customer to pay twice. In-process memory cannot do this job behind
+// replicas — the retry lands on a different instance.
+model PaymentIntent {
+  id             String   @id @default(cuid())
+  idempotencyKey String   @unique
+  provider       String
+  tender         String
+  amount         Int // sen
+  orderRef       String?
+  providerRef    String?
+  status         String   @default("PENDING")
+  redirectUrl    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([providerRef])
+}
+
 // Webhook deliveries already applied, so a captured payload cannot be replayed.
 // A PSP retries on any non-2xx and the network retries under it, so redelivery
 // is ordinary traffic — the difference between a retry and an attack is only
