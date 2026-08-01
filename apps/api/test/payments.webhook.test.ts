@@ -18,12 +18,18 @@ describe('payments — the webhook sink', () => {
 
   beforeEach(() => {
     process.env.PSP_WEBHOOK_SECRET = SECRET;
+    // The mock is opt-in now, and refused outright in production — it captures
+    // every payment after five seconds, so a live instance falling back to it
+    // would record money that never arrived.
+    process.env.PAYMENTS_ENABLE_MOCK = 'true';
     payments = new PaymentsService(prisma as never);
+    payments.reloadProviders();
   });
 
   afterAll(() => {
     if (previousSecret === undefined) delete process.env.PSP_WEBHOOK_SECRET;
     else process.env.PSP_WEBHOOK_SECRET = previousSecret;
+    delete process.env.PAYMENTS_ENABLE_MOCK;
   });
 
   const sign = (raw: string, secret = SECRET) =>
@@ -219,11 +225,22 @@ describe('payments — the webhook sink', () => {
       ).toBe(1);
     });
 
-    it('refuses a status that is not a PSP outcome', async () => {
+    it('records a status it does not act on rather than refusing the delivery', async () => {
+      // Signed, so it genuinely came from the PSP — refusing would only buy an
+      // endless redelivery loop, since every gateway retries on a non-2xx. The
+      // payment is left alone and the unhandled state is written down, so a new
+      // status a gateway starts sending is visible rather than invisible.
       const payment = await pendingPayment();
-      await expect(
-        deliver({ eventId: 'evt-bad', providerRef: payment.providerRef, status: 'REFUNDED' }),
-      ).rejects.toThrow(UnauthorizedException);
+      const result = await deliver({
+        eventId: 'evt-bad',
+        providerRef: payment.providerRef,
+        status: 'REFUNDED',
+      });
+
+      expect(result).toMatchObject({ ok: true });
+      const after = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(after.status).toBe('PENDING');
+      expect(await prisma.auditLog.count({ where: { action: 'PAYMENT_WEBHOOK_UNHANDLED' } })).toBe(1);
     });
 
     it('does not move a payment already refunded', async () => {
@@ -280,6 +297,97 @@ describe('payments — the webhook sink', () => {
         idempotencyKey: 'idem-2',
       });
       expect(again.providerRef).toBe(first.providerRef);
+      expect(await prisma.paymentIntent.count()).toBe(1);
+    });
+
+    it('holds that line across replicas, not just within one process', async () => {
+      // The reservation is a row with a unique key, so a retry landing on
+      // another instance re-reads the first bill. In-process memory would open
+      // a second one and invite the customer to pay twice.
+      const key = 'idem-shared';
+      const [a, b, c] = await Promise.all([
+        payments.createIntent({ tender: 'DUITNOW_QR', amount: 4500, orderRef: 'o', idempotencyKey: key }),
+        payments.createIntent({ tender: 'DUITNOW_QR', amount: 4500, orderRef: 'o', idempotencyKey: key }),
+        payments.createIntent({ tender: 'DUITNOW_QR', amount: 4500, orderRef: 'o', idempotencyKey: key }),
+      ]);
+
+      expect(await prisma.paymentIntent.count()).toBe(1);
+      expect(new Set([a.providerRef, b.providerRef, c.providerRef]).size).toBe(1);
+    });
+
+    it('refuses an electronic tender with no gateway behind it', async () => {
+      // Rather than mocking it. A terminal that says "not configured" sends the
+      // cashier to another tender; one that silently captures sends the
+      // customer away with goods and no money taken.
+      payments.reloadProviders({});
+      await expect(
+        payments.createIntent({
+          tender: 'DUITNOW_QR',
+          amount: 4500,
+          orderRef: 'ord-x',
+          idempotencyKey: 'idem-x',
+        }),
+      ).rejects.toThrow(/BILLPLZ_API_KEY/);
+    });
+
+    it('still takes cash and a manually-keyed card with no gateway at all', async () => {
+      payments.reloadProviders({});
+      for (const tender of ['CASH', 'CARD_MANUAL', 'CARD_TERMINAL']) {
+        const intent = await payments.createIntent({
+          tender,
+          amount: 4500,
+          orderRef: 'ord-y',
+          idempotencyKey: `idem-${tender}`,
+        });
+        expect(intent.status).toBe('CAPTURED');
+      }
+    });
+
+    it('tells the cashier what to do when the gateway will not answer', async () => {
+      // A 500 leaves them staring at a spinner. This says which tender to reach
+      // for instead, and stays retryable — the reservation is unfulfilled, so
+      // the next attempt calls the gateway again rather than opening a second
+      // bill.
+      const failing = {
+        name: 'FLAKY',
+        createIntent: async () => {
+          throw new Error('connect ETIMEDOUT');
+        },
+        getStatus: async () => ({ providerRef: 'x', status: 'FAILED' as const }),
+        refund: async () => ({ ok: false }),
+        verifyWebhook: () => ({ valid: false }),
+      };
+      payments.reloadProviders({});
+      (
+        payments as unknown as { routing: { byTender: Record<string, unknown> } }
+      ).routing.byTender.DUITNOW_QR = failing;
+
+      await expect(
+        payments.createIntent({
+          tender: 'DUITNOW_QR',
+          amount: 4500,
+          orderRef: 'ord-f',
+          idempotencyKey: 'idem-flaky',
+        }),
+      ).rejects.toThrow(/cash or a manually-keyed card/i);
+
+      const reserved = await prisma.paymentIntent.findUniqueOrThrow({
+        where: { idempotencyKey: 'idem-flaky' },
+      });
+      expect(reserved.providerRef).toBeNull();
+    });
+
+    it('refuses an amount that is not positive whole sen', async () => {
+      for (const amount of [0, -100, 12.5]) {
+        await expect(
+          payments.createIntent({
+            tender: 'DUITNOW_QR',
+            amount,
+            orderRef: 'ord-z',
+            idempotencyKey: `idem-${amount}`,
+          }),
+        ).rejects.toThrow(/amount/i);
+      }
     });
 
     it('settles a tender with no provider immediately — cash and manual card', async () => {
