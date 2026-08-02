@@ -482,6 +482,66 @@ describe('orders — the server is the pricing authority', () => {
       expect(level.onHand).toBe(7);
     });
 
+    it('records which rail settled the payment, not a rail that did not', async () => {
+      // This used to stamp every electronic payment `MOCK` whatever took it,
+      // so a real settlement was indistinguishable in the database from money
+      // the demo rail invented. Cash is cash; a manually-keyed card was taken
+      // on the merchant's own terminal, so it is external to this system.
+      const { variant } = await makeProduct({ outletId, price: 500 });
+
+      const cash = await orders.create(
+        orderDto({
+          outletId,
+          registerId,
+          staffId,
+          lines: [line(variant, { unitPrice: 500 })],
+          payments: [{ tender: 'CASH', amount: 500 }],
+        }),
+      );
+      const card = await orders.create(
+        orderDto({
+          outletId,
+          registerId,
+          staffId,
+          lines: [line(variant, { unitPrice: 500 })],
+          payments: [{ tender: 'CARD_MANUAL', amount: 500, reference: 'APPROVAL-1' }],
+        }),
+      );
+
+      const cashPayment = await prisma.payment.findFirstOrThrow({ where: { orderId: cash.order.id } });
+      const cardPayment = await prisma.payment.findFirstOrThrow({ where: { orderId: card.order.id } });
+      expect(cashPayment.provider).toBe('CASH');
+      expect(cardPayment.provider).toBe('EXTERNAL');
+      expect(cardPayment.provider).not.toBe('MOCK');
+    });
+
+    it('names the gateway that opened the bill when there was one', async () => {
+      const { variant } = await makeProduct({ outletId, price: 500 });
+      await prisma.paymentIntent.create({
+        data: {
+          idempotencyKey: 'intent-for-order',
+          provider: 'BILLPLZ',
+          tender: 'DUITNOW_QR',
+          amount: 500,
+          providerRef: 'bill_settled',
+          status: 'CAPTURED',
+        },
+      });
+
+      const { order } = await orders.create(
+        orderDto({
+          outletId,
+          registerId,
+          staffId,
+          lines: [line(variant, { unitPrice: 500 })],
+          payments: [{ tender: 'DUITNOW_QR', amount: 500, reference: 'bill_settled' }],
+        }),
+      );
+
+      const payment = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id } });
+      expect(payment.provider).toBe('BILLPLZ');
+    });
+
     it('is still idempotent on the offline retry key', async () => {
       const { variant } = await makeProduct({ outletId, price: 500 });
       const dto = orderDto({

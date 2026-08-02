@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { PaymentsService } from './payments.service';
-import { AuthGuard, Roles } from '../common/auth.guard';
+import { AuthGuard, Roles, resolveOutletScope } from '../common/auth.guard';
 
 @Controller('payments')
 export class PaymentsController {
@@ -52,10 +52,21 @@ export class PaymentsController {
     return this.payments.webhook(provider, headers, raw);
   }
 
+  /**
+   * Ledger tender totals for a day.
+   *
+   * Scoped like every other outlet-scoped read. This was the one that was not:
+   * inventory, orders, reports and shifts all resolve the outlet through the
+   * caller, and this took a date alone, so a manager pinned to one outlet could
+   * read the whole deployment's takings.
+   */
   @Get('reconciliation')
   @UseGuards(AuthGuard)
   @Roles('OWNER', 'MANAGER')
-  reconciliation(@Query('date') date: string) {
-    return this.payments.reconciliation(date ?? new Date().toISOString().slice(0, 10));
+  reconciliation(@Query('date') date: string, @Query('outletId') outletId: string, @Req() req: any) {
+    return this.payments.reconciliation(
+      date ?? new Date().toISOString().slice(0, 10),
+      resolveOutletScope(req.user, outletId),
+    );
   }
 }
