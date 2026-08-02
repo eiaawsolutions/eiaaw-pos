@@ -238,14 +238,21 @@ export class PaymentsService implements OnModuleInit {
     return { ok: true };
   }
 
-  /** Daily reconciliation summary: ledger tender totals for a date */
-  async reconciliation(date: string) {
+  /**
+   * Daily reconciliation summary: ledger tender totals for a date.
+   *
+   * `outletId` is undefined only for a caller who is not pinned to one — an
+   * owner reading the whole business. Anyone pinned gets their own outlet and
+   * nothing else; the column and its composite index have been on LedgerEntry
+   * since ledger legs started carrying where the money moved.
+   */
+  async reconciliation(date: string, outletId?: string) {
     const start = new Date(date);
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
     const legs = await this.prisma.ledgerEntry.groupBy({
       by: ['account'],
-      where: { createdAt: { gte: start, lt: end } },
+      where: { createdAt: { gte: start, lt: end }, ...(outletId ? { outletId } : {}) },
       _sum: { debit: true, credit: true },
     });
     return legs.map((l) => ({

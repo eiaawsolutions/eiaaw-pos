@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TaxService } from '../catalog/tax.service';
 import { DiscountAuthorityService } from './discount-authority.service';
+import { MANUAL_TENDERS } from '../payments/providers/registry';
 import { CreateOrderDto, MONEY, TAX, businessDate, discountDemand } from '@eiaaw/shared';
 import { randomUUID } from 'crypto';
 
@@ -26,6 +27,18 @@ const TENDER_ACCOUNT: Record<string, string> = {
  * merchandise counter at an event, where the queue is the normal state.
  */
 const ORDER_TX_OPTIONS = { maxWait: 15_000, timeout: 30_000 } as const;
+
+/**
+ * What settled a payment that never went through a gateway.
+ *
+ * CASH is cash. The other manual tenders were taken on somebody else's
+ * hardware — the merchant's own bank terminal — so the honest label is that the
+ * money was handled outside this system, not that some provider here took it.
+ */
+function tenderProvider(tender: string): string {
+  if (tender === 'CASH') return 'CASH';
+  return MANUAL_TENDERS.has(tender) ? 'EXTERNAL' : 'UNKNOWN';
+}
 
 /** A line after the server has priced it. The request's own numbers are gone by here. */
 type PricedLine = {
@@ -121,6 +134,28 @@ export class OrdersService {
     const claimedTotal = this.claimedTotal(dto);
     const takesCash = payments.some((p) => p.tender === 'CASH');
 
+    // Which rail actually settled each payment.
+    //
+    // This used to read `p.tender === 'CASH' ? 'CASH' : 'MOCK'`, so every
+    // electronic payment was stored as MOCK whatever took it — a real Billplz
+    // settlement recorded under the name of the demo rail the registry refuses
+    // to allow anywhere near production. It made reconciliation by provider
+    // meaningless and, worse, made genuine money indistinguishable in the
+    // database from money the mock invented.
+    //
+    // The intent knows the truth: it was written when the bill was opened, by
+    // whichever provider opened it. Anything with no intent behind it settled
+    // at the counter.
+    const references = payments.map((p) => p.reference).filter((r): r is string => Boolean(r));
+    const settledBy = new Map<string, string>();
+    if (references.length) {
+      const intents = await this.prisma.paymentIntent.findMany({
+        where: { providerRef: { in: references } },
+        select: { providerRef: true, provider: true },
+      });
+      for (const i of intents) if (i.providerRef) settledBy.set(i.providerRef, i.provider);
+    }
+
     const order = await this.prisma.$transaction(async (tx) => {
       const orderNo = await this.allocateOrderNo(tx, outlet.id, outlet.timezone);
 
@@ -149,7 +184,7 @@ export class OrdersService {
               tender: p.tender,
               amount: p.amount,
               status: 'CAPTURED',
-              provider: p.tender === 'CASH' ? 'CASH' : 'MOCK',
+              provider: settledBy.get(p.reference ?? '') ?? tenderProvider(p.tender),
               providerRef: p.reference,
             })),
           },
